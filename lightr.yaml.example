@@ -1,0 +1,27 @@
+# Lightr Email Server Configuration
+
+# Directory for database and blob storage
+data_dir: ./data
+
+# HTTP API server
+http:
+  addr: ":8080"
+
+# SMTP server (inbound/outbound email)
+smtp:
+  addr: ":2525"              # Use :25 in production (requires root)
+  domain: "localhost"        # Server hostname for HELO/EHLO
+  max_message_bytes: 52428800 # 50MB
+  max_recipients: 50
+  allow_insecure: true       # Set to false in production, use TLS
+
+# IMAP server (email client access)
+imap:
+  addr: ":1143"              # Use :143 (or :993 for TLS) in production
+  allow_insecure: true       # Set to false in production, use TLS
+
+# DKIM signing configuration
+dkim:
+  selector: "default"        # DKIM selector (e.g., "default" -> default._domainkey.yourdomain.com)
+  key_bits: 2048             # RSA key size
+  # private_key_path: ""     # Path to DKIM private key (generated if not provided)

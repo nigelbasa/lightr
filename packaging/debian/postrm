@@ -1,0 +1,31 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    purge)
+        # Remove data directories on purge
+        rm -rf /var/lib/lightr
+        rm -rf /var/log/lightr
+        rm -rf /etc/lightr
+        
+        # Remove user and group
+        if getent passwd lightr >/dev/null; then
+            userdel lightr || true
+        fi
+        if getent group lightr >/dev/null; then
+            groupdel lightr || true
+        fi
+        ;;
+    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+    *)
+        echo "postrm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+fi
+
+exit 0

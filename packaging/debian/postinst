@@ -1,0 +1,43 @@
+#!/bin/bash
+set -e
+
+# Create lightr user and group
+if ! getent group lightr >/dev/null; then
+    groupadd --system lightr
+fi
+
+if ! getent passwd lightr >/dev/null; then
+    useradd --system --gid lightr --home-dir /var/lib/lightr \
+        --shell /usr/sbin/nologin --comment "Lightr Mail Server" lightr
+fi
+
+# Create directories
+mkdir -p /var/lib/lightr
+mkdir -p /var/log/lightr
+mkdir -p /etc/lightr
+
+# Set ownership
+chown -R lightr:lightr /var/lib/lightr
+chown -R lightr:lightr /var/log/lightr
+chown -R root:lightr /etc/lightr
+chmod 750 /etc/lightr
+
+# Enable and start service
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    systemctl enable lightr.service
+    echo ""
+    echo "Lightr installed successfully!"
+    echo ""
+    echo "To configure:"
+    echo "  sudo nano /etc/lightr/config.yaml"
+    echo ""
+    echo "To start:"
+    echo "  sudo systemctl start lightr"
+    echo ""
+    echo "To check status:"
+    echo "  sudo systemctl status lightr"
+    echo ""
+fi
+
+exit 0

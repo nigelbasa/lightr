@@ -1,0 +1,179 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          go build -ldflags="-s -w -X main.Version=${{ steps.version.outputs.VERSION }}" \
+            -o dist/lightr-${{ matrix.goos }}-${{ matrix.goarch }} \
+            ./cmd/lightr
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightr-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/lightr-${{ matrix.goos }}-${{ matrix.goarch }}
+
+  package-deb:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Download binary
+        uses: actions/download-artifact@v4
+        with:
+          name: lightr-linux-${{ matrix.arch }}
+          path: ./binary
+
+      - name: Build .deb package
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          ARCH=${{ matrix.arch }}
+          PKG_DIR=lightr_${VERSION}_${ARCH}
+          
+          # Create package structure
+          mkdir -p ${PKG_DIR}/DEBIAN
+          mkdir -p ${PKG_DIR}/usr/bin
+          mkdir -p ${PKG_DIR}/etc/lightr
+          mkdir -p ${PKG_DIR}/lib/systemd/system
+          
+          # Copy binary
+          cp binary/lightr-linux-${ARCH} ${PKG_DIR}/usr/bin/lightr
+          chmod 755 ${PKG_DIR}/usr/bin/lightr
+          
+          # Copy config
+          cp config/config.minimal.yaml ${PKG_DIR}/etc/lightr/config.yaml.example
+          
+          # Copy systemd service
+          cp packaging/lightr.service ${PKG_DIR}/lib/systemd/system/lightr.service
+          
+          # Create control file
+          sed "s/{{VERSION}}/${VERSION}/g" packaging/debian/control > ${PKG_DIR}/DEBIAN/control
+          sed -i "s/Architecture: amd64/Architecture: ${ARCH}/g" ${PKG_DIR}/DEBIAN/control
+          
+          # Copy maintainer scripts
+          cp packaging/debian/postinst ${PKG_DIR}/DEBIAN/
+          cp packaging/debian/prerm ${PKG_DIR}/DEBIAN/
+          cp packaging/debian/postrm ${PKG_DIR}/DEBIAN/
+          chmod 755 ${PKG_DIR}/DEBIAN/postinst
+          chmod 755 ${PKG_DIR}/DEBIAN/prerm
+          chmod 755 ${PKG_DIR}/DEBIAN/postrm
+          
+          # Build package
+          dpkg-deb --build ${PKG_DIR}
+          mv ${PKG_DIR}.deb lightr_${VERSION}_${ARCH}.deb
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightr-deb-${{ matrix.arch }}
+          path: lightr_*.deb
+
+  release:
+    needs: [build, package-deb]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          # Copy binaries
+          cp artifacts/lightr-linux-amd64/lightr-linux-amd64 release/
+          cp artifacts/lightr-linux-arm64/lightr-linux-arm64 release/
+          # Copy .deb packages
+          cp artifacts/lightr-deb-amd64/*.deb release/
+          cp artifacts/lightr-deb-arm64/*.deb release/
+          # Create checksums
+          cd release && sha256sum * > checksums.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Lightr v${{ steps.version.outputs.VERSION }}
+          body: |
+            ## Lightr v${{ steps.version.outputs.VERSION }}
+            
+            ### Installation
+            
+            **Debian/Ubuntu (amd64):**
+            ```bash
+            wget https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.VERSION }}/lightr_${{ steps.version.outputs.VERSION }}_amd64.deb
+            sudo dpkg -i lightr_${{ steps.version.outputs.VERSION }}_amd64.deb
+            ```
+            
+            **Debian/Ubuntu (arm64):**
+            ```bash
+            wget https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.VERSION }}/lightr_${{ steps.version.outputs.VERSION }}_arm64.deb
+            sudo dpkg -i lightr_${{ steps.version.outputs.VERSION }}_arm64.deb
+            ```
+            
+            **Binary (amd64):**
+            ```bash
+            wget https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.VERSION }}/lightr-linux-amd64
+            chmod +x lightr-linux-amd64
+            sudo mv lightr-linux-amd64 /usr/local/bin/lightr
+            ```
+            
+            ### Quick Start
+            ```bash
+            sudo cp /etc/lightr/config.yaml.example /etc/lightr/config.yaml
+            sudo nano /etc/lightr/config.yaml
+            sudo systemctl start lightr
+            ```
+          files: release/*
+          draft: false
+          prerelease: false

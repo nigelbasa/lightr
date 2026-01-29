@@ -1,0 +1,27 @@
+# Binaries
+lightr
+*.exe
+
+# Development files
+.git
+.gitignore
+*.md
+!README.md
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Local data
+data/
+*.db
+*.pem
+*.crt
+*.key
+lightr.yaml
+
+# Test files
+*_test.go
+testdata/

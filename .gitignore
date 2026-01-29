@@ -1,0 +1,44 @@
+# Binaries
+lightr
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Build output
+dist/
+
+# Data files
+data/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Certificates (generated)
+*.crt
+*.key
+*.pem
+
+# Config with secrets
+lightr.yaml
+!lightr.yaml.example
+!config/config.minimal.yaml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test output
+coverage.out
+*.test
+
+# Logs
+*.log
+logs/

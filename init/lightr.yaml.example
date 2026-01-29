@@ -1,0 +1,23 @@
+# Lightr Email Server Configuration
+# System-wide config at /etc/lightr/lightr.yaml
+
+data_dir: /var/lib/lightr
+http:
+  addr: :8080
+smtp:
+  addr: :2525
+  domain: localhost
+  max_message_bytes: 52428800
+  max_recipients: 50
+  allow_insecure: false
+imap:
+  addr: :1143
+  allow_insecure: false
+dkim:
+  selector: default
+  key_bits: 2048
+api:
+  key: ""  # Generated on first run with 'lightr init'
+tls:
+  cert_file: ""  # /etc/lightr/certs/server.crt
+  key_file: ""   # /etc/lightr/certs/server.key

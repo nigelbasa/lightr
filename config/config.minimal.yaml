@@ -1,0 +1,97 @@
+# Lightr Minimal Configuration
+# For running with MX records only (no DKIM/DMARC)
+
+server:
+  hostname: mail.yourdomain.com  # Change this
+  bind_address: 0.0.0.0
+  
+# SMTP receiving (port 25)
+smtp:
+  enabled: true
+  port: 25
+  # For testing, also listen on 2525 (no root needed)
+  alt_port: 2525
+  max_message_size: 26214400  # 25MB
+  max_recipients: 100
+  
+  # TLS - optional but recommended
+  # Get free certs from Let's Encrypt
+  tls:
+    enabled: false  # Set true when you have certs
+    cert_file: ""
+    key_file: ""
+    
+# Submission (port 587 - for sending)
+submission:
+  enabled: true
+  port: 587
+  require_auth: true
+  require_tls: true  # Set false if no certs yet
+
+# IMAP (port 993)
+imap:
+  enabled: true
+  port: 143
+  tls_port: 993
+
+# Database
+database:
+  path: /var/lib/lightr/lightr.db
+  # For testing:
+  # path: ./data/lightr.db
+
+# Authentication - DISABLE in production without DKIM
+# Emails sent without DKIM will likely be marked as spam
+outbound:
+  enabled: true
+  
+  # Skip DKIM signing (not recommended for production)
+  dkim:
+    enabled: false
+    
+  # Skip DMARC checks on outbound
+  dmarc:
+    enabled: false
+    
+  # Rate limit outbound to avoid being blocked
+  rate_limit:
+    per_minute: 10
+    per_hour: 100
+    per_day: 500
+
+# Inbound email verification
+inbound:
+  # SPF checking - recommended to keep enabled
+  spf:
+    enabled: true
+    soft_fail_action: accept  # accept, reject, quarantine
+    hard_fail_action: quarantine
+    
+  # DKIM verification on incoming - keep enabled
+  dkim:
+    enabled: true
+    fail_action: accept  # Don't reject, just flag
+    
+  # DMARC policy checking on incoming
+  dmarc:
+    enabled: true
+    fail_action: accept  # Accept but flag
+
+# Spam filtering
+spam:
+  enabled: true
+  threshold: 5.0
+  
+# REST API
+api:
+  enabled: true
+  port: 8080
+  # Generate with: openssl rand -hex 32
+  admin_key: "CHANGE_ME_generate_a_random_key"
+
+# Logging
+logging:
+  level: info  # debug, info, warn, error
+  file: /var/log/lightr/lightr.log
+  # For testing:
+  # file: ./logs/lightr.log

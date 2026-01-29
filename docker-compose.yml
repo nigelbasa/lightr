@@ -1,0 +1,24 @@
+version: "3.8"
+
+services:
+  lightr:
+    build: .
+    ports:
+      - "8080:8080"   # HTTP API
+      - "2525:2525"   # SMTP
+      - "1143:1143"   # IMAP
+    volumes:
+      - lightr-data:/app/data
+      - ./lightr.yaml:/app/lightr.yaml:ro
+    environment:
+      - TZ=UTC
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  lightr-data:
