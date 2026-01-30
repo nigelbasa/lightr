@@ -1,10 +1,15 @@
 package imap
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"log"
+	"mime"
+	"mime/multipart"
+	"net/mail"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +19,54 @@ import (
 	"github.com/google/uuid"
 	"github.com/nigelbasa/lightr/internal/domain"
 )
+
+// IdleNotifier manages IDLE connections and notifications
+type IdleNotifier struct {
+	mu       sync.RWMutex
+	sessions map[uuid.UUID][]chan uint32 // accountID -> list of IDLE channels
+}
+
+var globalIdleNotifier = &IdleNotifier{
+	sessions: make(map[uuid.UUID][]chan uint32),
+}
+
+// RegisterIdle registers an IDLE session for notifications
+func (n *IdleNotifier) RegisterIdle(accountID uuid.UUID, ch chan uint32) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.sessions[accountID] = append(n.sessions[accountID], ch)
+}
+
+// UnregisterIdle removes an IDLE session
+func (n *IdleNotifier) UnregisterIdle(accountID uuid.UUID, ch chan uint32) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	channels := n.sessions[accountID]
+	for i, c := range channels {
+		if c == ch {
+			n.sessions[accountID] = append(channels[:i], channels[i+1:]...)
+			break
+		}
+	}
+}
+
+// NotifyNewMail notifies all IDLE sessions for an account of new mail
+func (n *IdleNotifier) NotifyNewMail(accountID uuid.UUID, msgCount uint32) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	for _, ch := range n.sessions[accountID] {
+		select {
+		case ch <- msgCount:
+		default:
+			// Channel full, skip
+		}
+	}
+}
+
+// GetIdleNotifier returns the global IDLE notifier
+func GetIdleNotifier() *IdleNotifier {
+	return globalIdleNotifier
+}
 
 // Backend provides the session factory for IMAP connections
 type Backend struct {
@@ -227,8 +280,26 @@ func (s *Session) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error {
 }
 
 func (s *Session) Idle(w *imapserver.UpdateWriter, stop <-chan struct{}) error {
-	<-stop
-	return nil
+	if s.account == nil {
+		return fmt.Errorf("not authenticated")
+	}
+
+	// Create notification channel
+	notifyCh := make(chan uint32, 10)
+	globalIdleNotifier.RegisterIdle(s.account.ID, notifyCh)
+	defer globalIdleNotifier.UnregisterIdle(s.account.ID, notifyCh)
+
+	for {
+		select {
+		case <-stop:
+			return nil
+		case msgCount := <-notifyCh:
+			// New mail arrived - notify client
+			if err := w.WriteNumMessages(msgCount); err != nil {
+				return err
+			}
+		}
+	}
 }
 
 func (s *Session) Unselect() error {
@@ -338,14 +409,84 @@ func (s *Session) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, options *
 			respWriter.WriteFlags(flags)
 		}
 
+		// Write internal date
+		if options.InternalDate {
+			respWriter.WriteInternalDate(msg.ReceivedAt)
+		}
+
+		// Write RFC822 size
+		if options.RFC822Size {
+			respWriter.WriteRFC822Size(msg.SizeBytes)
+		}
+
+		// Write body structure if requested
+		if options.BodyStructure != nil {
+			data, err := s.backend.BlobStorage.Get(msg.StoragePath)
+			if err == nil {
+				bs := buildBodyStructure(data, options.BodyStructure.Extended)
+				respWriter.WriteBodyStructure(bs)
+			}
+		}
+
 		// Write body if requested
 		for _, section := range options.BodySection {
 			data, err := s.backend.BlobStorage.Get(msg.StoragePath)
 			if err != nil {
+				log.Printf("Failed to read message body: %v", err)
 				continue
 			}
-			bw := respWriter.WriteBodySection(section, int64(len(data)))
-			bw.Write(data)
+			
+			// Mark as read when body is fetched (unless PEEK)
+			if !section.Peek && msg.ReadAt == nil {
+				now := time.Now()
+				msg.ReadAt = &now
+				s.backend.MessageRepo.UpdateMessage(msg)
+			}
+			
+			// Handle different section specifiers
+			var bodyData []byte
+			
+			// First check if a specific part is requested (e.g., BODY[1], BODY[2])
+			if len(section.Part) > 0 {
+				// Extract the specific part from the multipart message
+				bodyData = extractMessagePart(data, section.Part)
+			} else {
+				switch section.Specifier {
+				case imap.PartSpecifierText:
+					// Return only the body (after headers)
+					// Find the blank line separating headers from body
+					idx := strings.Index(string(data), "\r\n\r\n")
+					if idx == -1 {
+						idx = strings.Index(string(data), "\n\n")
+						if idx != -1 {
+							bodyData = data[idx+2:]
+						} else {
+							bodyData = data
+						}
+					} else {
+						bodyData = data[idx+4:]
+					}
+				case imap.PartSpecifierHeader:
+					// Return only the headers
+					idx := strings.Index(string(data), "\r\n\r\n")
+					if idx == -1 {
+						idx = strings.Index(string(data), "\n\n")
+						if idx != -1 {
+							bodyData = data[:idx+2]
+						} else {
+							bodyData = data
+						}
+					} else {
+						bodyData = data[:idx+4]
+					}
+				default:
+					// Return full message for BODY[] or other specifiers
+					bodyData = data
+				}
+			}
+			
+			bw := respWriter.WriteBodySection(section, int64(len(bodyData)))
+			bw.Write(bodyData)
 			bw.Close()
 		}
 
@@ -358,7 +499,92 @@ func (s *Session) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, options *
 }
 
 func (s *Session) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags *imap.StoreFlags, options *imap.StoreOptions) error {
-	// Update message flags
+	if s.account == nil {
+		return fmt.Errorf("not authenticated")
+	}
+
+	s.mu.Lock()
+	mailbox := s.selected
+	s.mu.Unlock()
+
+	if mailbox == "" {
+		return fmt.Errorf("no mailbox selected")
+	}
+
+	msgs, err := s.backend.MessageRepo.ListByAccount(s.account.ID, mailbox)
+	if err != nil {
+		return err
+	}
+
+	for i, msg := range msgs {
+		seqNum := uint32(i + 1)
+		uid := imap.UID(i + 1)
+
+		// Check if this message is in the requested set
+		inSet := false
+		switch set := numSet.(type) {
+		case imap.SeqSet:
+			inSet = set.Contains(seqNum)
+		case *imap.SeqSet:
+			inSet = set.Contains(seqNum)
+		case imap.UIDSet:
+			inSet = set.Contains(uid)
+		case *imap.UIDSet:
+			inSet = set.Contains(uid)
+		default:
+			inSet = true
+		}
+		if !inSet {
+			continue
+		}
+
+		// Process flag changes
+		for _, flag := range flags.Flags {
+			if flag == imap.FlagSeen {
+				switch flags.Op {
+				case imap.StoreFlagsAdd:
+					if msg.ReadAt == nil {
+						now := time.Now()
+						msg.ReadAt = &now
+						s.backend.MessageRepo.UpdateMessage(msg)
+					}
+				case imap.StoreFlagsDel:
+					if msg.ReadAt != nil {
+						msg.ReadAt = nil
+						s.backend.MessageRepo.UpdateMessage(msg)
+					}
+				case imap.StoreFlagsSet:
+					now := time.Now()
+					msg.ReadAt = &now
+					s.backend.MessageRepo.UpdateMessage(msg)
+				}
+			}
+			if flag == imap.FlagDeleted {
+				if flags.Op == imap.StoreFlagsAdd || flags.Op == imap.StoreFlagsSet {
+					now := time.Now()
+					msg.DeletedAt = &now
+					s.backend.MessageRepo.UpdateMessage(msg)
+				}
+			}
+		}
+
+		// Write response if not silent
+		if !flags.Silent {
+			respWriter := w.CreateMessage(seqNum)
+			respWriter.WriteUID(uid)
+			
+			currentFlags := []imap.Flag{}
+			if msg.ReadAt != nil {
+				currentFlags = append(currentFlags, imap.FlagSeen)
+			}
+			if msg.DeletedAt != nil {
+				currentFlags = append(currentFlags, imap.FlagDeleted)
+			}
+			respWriter.WriteFlags(currentFlags)
+			respWriter.Close()
+		}
+	}
+
 	return nil
 }
 
@@ -372,17 +598,295 @@ func parseAddressList(addr string) []imap.Address {
 	if addr == "" {
 		return nil
 	}
-	// Simple parse - just extract email
-	parts := strings.Split(addr, "@")
-	if len(parts) != 2 {
-		return []imap.Address{{Mailbox: addr, Host: ""}}
+	
+	// Try to parse as RFC 5322 address (e.g., "Display Name <email@example.com>")
+	// or simple email (e.g., "email@example.com")
+	addr = strings.TrimSpace(addr)
+	
+	var name, mailbox, host string
+	
+	// Check for "Name <email>" format
+	if idx := strings.Index(addr, "<"); idx != -1 {
+		name = strings.TrimSpace(addr[:idx])
+		name = strings.Trim(name, "\"") // Remove quotes if present
+		
+		endIdx := strings.Index(addr, ">")
+		if endIdx == -1 {
+			endIdx = len(addr)
+		}
+		email := strings.TrimSpace(addr[idx+1 : endIdx])
+		
+		parts := strings.SplitN(email, "@", 2)
+		if len(parts) == 2 {
+			mailbox = parts[0]
+			host = parts[1]
+		} else {
+			mailbox = email
+		}
+	} else {
+		// Simple email format
+		parts := strings.SplitN(addr, "@", 2)
+		if len(parts) == 2 {
+			mailbox = parts[0]
+			host = parts[1]
+		} else {
+			mailbox = addr
+		}
 	}
-	return []imap.Address{{Mailbox: parts[0], Host: parts[1]}}
+	
+	return []imap.Address{{
+		Name:    name,
+		Mailbox: mailbox,
+		Host:    host,
+	}}
+}
+
+// buildBodyStructure parses the email and builds the correct BODYSTRUCTURE
+func buildBodyStructure(data []byte, extended bool) imap.BodyStructure {
+	msg, err := mail.ReadMessage(bytes.NewReader(data))
+	if err != nil {
+		// Fallback to simple text/plain
+		return buildSimpleBodyStructure(data, extended)
+	}
+	
+	contentType := msg.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "text/plain"
+	}
+	
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return buildSimpleBodyStructure(data, extended)
+	}
+	
+	// Get encoding and disposition from headers
+	encoding := strings.ToUpper(msg.Header.Get("Content-Transfer-Encoding"))
+	if encoding == "" {
+		encoding = "7BIT"
+	}
+	disposition := msg.Header.Get("Content-Disposition")
+	
+	// Read the body
+	body, err := io.ReadAll(msg.Body)
+	if err != nil {
+		return buildSimpleBodyStructure(data, extended)
+	}
+	
+	if strings.HasPrefix(mediaType, "multipart/") {
+		return buildMultipartBodyStructure(mediaType, params, body, extended)
+	}
+	
+	return buildSinglePartBodyStructureWithHeaders(mediaType, params, body, encoding, disposition, extended)
+}
+
+func buildSimpleBodyStructure(data []byte, extended bool) imap.BodyStructure {
+	bs := &imap.BodyStructureSinglePart{
+		Type:     "text",
+		Subtype:  "plain",
+		Params:   map[string]string{"charset": "utf-8"},
+		Encoding: "7BIT",
+		Size:     uint32(len(data)),
+	}
+	if extended {
+		bs.Extended = &imap.BodyStructureSinglePartExt{}
+	}
+	return bs
+}
+
+func buildSinglePartBodyStructure(mediaType string, params map[string]string, body []byte, extended bool) imap.BodyStructure {
+	return buildSinglePartBodyStructureWithHeaders(mediaType, params, body, "7BIT", "", extended)
+}
+
+func buildSinglePartBodyStructureWithHeaders(mediaType string, params map[string]string, body []byte, encoding, disposition string, extended bool) imap.BodyStructure {
+	parts := strings.SplitN(mediaType, "/", 2)
+	mainType := "text"
+	subType := "plain"
+	if len(parts) == 2 {
+		mainType = parts[0]
+		subType = parts[1]
+	}
+	
+	// Use the encoding passed from headers, default to 7BIT
+	if encoding == "" {
+		encoding = "7BIT"
+	}
+	encoding = strings.ToUpper(encoding)
+	
+	charset := params["charset"]
+	if charset == "" && mainType == "text" {
+		charset = "us-ascii"
+	}
+	
+	bsParams := make(map[string]string)
+	if charset != "" {
+		bsParams["charset"] = charset
+	}
+	// Include name parameter if present (for attachments)
+	if name := params["name"]; name != "" {
+		bsParams["name"] = name
+	}
+	
+	bs := &imap.BodyStructureSinglePart{
+		Type:     mainType,
+		Subtype:  subType,
+		Params:   bsParams,
+		Encoding: encoding,
+		Size:     uint32(len(body)),
+	}
+	
+	if extended {
+		ext := &imap.BodyStructureSinglePartExt{}
+		// Parse disposition if present
+		if disposition != "" {
+			dispType, dispParams, err := mime.ParseMediaType(disposition)
+			if err == nil {
+				ext.Disposition = &imap.BodyStructureDisposition{
+					Value:  strings.ToUpper(dispType),
+					Params: dispParams,
+				}
+			}
+		}
+		bs.Extended = ext
+	}
+	return bs
+}
+
+func buildMultipartBodyStructure(mediaType string, params map[string]string, body []byte, extended bool) imap.BodyStructure {
+	parts := strings.SplitN(mediaType, "/", 2)
+	subType := "mixed"
+	if len(parts) == 2 {
+		subType = parts[1]
+	}
+	
+	boundary := params["boundary"]
+	if boundary == "" {
+		// No boundary, return as single part
+		return buildSimpleBodyStructure(body, extended)
+	}
+	
+	// Parse multipart
+	mr := multipart.NewReader(bytes.NewReader(body), boundary)
+	
+	var children []imap.BodyStructure
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+		
+		partContentType := part.Header.Get("Content-Type")
+		if partContentType == "" {
+			partContentType = "text/plain"
+		}
+		
+		partMediaType, partParams, _ := mime.ParseMediaType(partContentType)
+		partBody, _ := io.ReadAll(part)
+		
+		// Get encoding and disposition from part headers
+		partEncoding := part.Header.Get("Content-Transfer-Encoding")
+		partDisposition := part.Header.Get("Content-Disposition")
+		
+		if strings.HasPrefix(partMediaType, "multipart/") {
+			children = append(children, buildMultipartBodyStructure(partMediaType, partParams, partBody, extended))
+		} else {
+			children = append(children, buildSinglePartBodyStructureWithHeaders(partMediaType, partParams, partBody, partEncoding, partDisposition, extended))
+		}
+	}
+	
+	if len(children) == 0 {
+		return buildSimpleBodyStructure(body, extended)
+	}
+	
+	bs := &imap.BodyStructureMultiPart{
+		Children: children,
+		Subtype:  subType,
+	}
+	if extended {
+		bs.Extended = &imap.BodyStructureMultiPartExt{}
+	}
+	return bs
+}
+
+// extractMessagePart extracts a specific part from a multipart message
+// partPath is a slice like [1] for part 1, [1, 2] for part 1.2, etc.
+func extractMessagePart(data []byte, partPath []int) []byte {
+	if len(partPath) == 0 {
+		return data
+	}
+	
+	msg, err := mail.ReadMessage(bytes.NewReader(data))
+	if err != nil {
+		return data
+	}
+	
+	contentType := msg.Header.Get("Content-Type")
+	if contentType == "" {
+		// Not multipart, return body directly
+		body, _ := io.ReadAll(msg.Body)
+		return body
+	}
+	
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil || !strings.HasPrefix(mediaType, "multipart/") {
+		// Not multipart, return body directly
+		body, _ := io.ReadAll(msg.Body)
+		return body
+	}
+	
+	boundary := params["boundary"]
+	if boundary == "" {
+		body, _ := io.ReadAll(msg.Body)
+		return body
+	}
+	
+	// Read the body
+	body, _ := io.ReadAll(msg.Body)
+	
+	// Parse multipart
+	mr := multipart.NewReader(bytes.NewReader(body), boundary)
+	
+	partNum := partPath[0]
+	currentPart := 0
+	
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+		currentPart++
+		
+		if currentPart == partNum {
+			partBody, _ := io.ReadAll(part)
+			
+			// If there are more levels in the path, recurse
+			if len(partPath) > 1 {
+				// Reconstruct message-like structure for nested multipart
+				partContentType := part.Header.Get("Content-Type")
+				if strings.HasPrefix(partContentType, "multipart/") {
+					// Create a minimal message header to parse the nested multipart
+					nestedMsg := append([]byte("Content-Type: "+partContentType+"\r\n\r\n"), partBody...)
+					return extractMessagePart(nestedMsg, partPath[1:])
+				}
+			}
+			
+			return partBody
+		}
+	}
+	
+	// Part not found, return empty
+	return []byte{}
 }
 
 // Server wraps the IMAP server
 type Server struct {
 	addr      string
+	tlsAddr   string
 	backend   *Backend
 	tlsConfig *tls.Config
 }
@@ -393,6 +897,11 @@ func NewServer(addr string, backend *Backend) *Server {
 		addr:    addr,
 		backend: backend,
 	}
+}
+
+// WithTLSAddr sets the implicit TLS port (993)
+func (s *Server) WithTLSAddr(addr string) {
+	s.tlsAddr = addr
 }
 
 // WithTLS configures TLS support for IMAPS
@@ -418,7 +927,7 @@ func (s *Server) Start() error {
 
 	if s.tlsConfig != nil {
 		opts.InsecureAuth = false
-		log.Printf("Starting IMAP server at %s with TLS", s.addr)
+		log.Printf("Starting IMAP server at %s with STARTTLS", s.addr)
 	} else {
 		opts.InsecureAuth = true
 		log.Printf("Starting IMAP server at %s (insecure)", s.addr)
@@ -426,4 +935,22 @@ func (s *Server) Start() error {
 
 	srv := imapserver.New(opts)
 	return srv.ListenAndServe(s.addr)
+}
+
+// StartTLS starts the implicit TLS IMAP server (port 993)
+func (s *Server) StartTLS() error {
+	if s.tlsAddr == "" || s.tlsConfig == nil {
+		return nil // No TLS addr configured
+	}
+
+	opts := &imapserver.Options{
+		NewSession:   s.backend.NewSession,
+		Caps:         imap.CapSet{imap.CapIMAP4rev1: {}},
+		TLSConfig:    s.tlsConfig,
+		InsecureAuth: false,
+	}
+
+	log.Printf("Starting IMAPS server at %s (implicit TLS)", s.tlsAddr)
+	srv := imapserver.New(opts)
+	return srv.ListenAndServeTLS(s.tlsAddr)
 }

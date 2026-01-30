@@ -206,6 +206,24 @@ func (s *SQLiteStore) GetAccountByEmail(email string) (*domain.Account, error) {
 	return acc, nil
 }
 
+func (s *SQLiteStore) GetAccountByLocalPart(domainID uuid.UUID, localPart string) (*domain.Account, error) {
+	row := s.db.QueryRow(`
+		SELECT id, domain_id, local_part, auth_mode, password_hash, external_id, quota_bytes, used_bytes 
+		FROM accounts 
+		WHERE domain_id = ? AND local_part = ?`, domainID.String(), localPart)
+
+	acc := &domain.Account{}
+	var accID, domID, authMode string
+	err := row.Scan(&accID, &domID, &acc.LocalPart, &authMode, &acc.PasswordHash, &acc.ExternalID, &acc.QuotaBytes, &acc.UsedBytes)
+	if err != nil {
+		return nil, err
+	}
+	acc.ID, _ = uuid.Parse(accID)
+	acc.DomainID, _ = uuid.Parse(domID)
+	acc.AuthMode = domain.AuthMode(authMode)
+	return acc, nil
+}
+
 func (s *SQLiteStore) UpdateAccount(acc *domain.Account) error {
 	_, err := s.db.Exec(`UPDATE accounts SET password_hash = ?, used_bytes = ? WHERE id = ?`,
 		acc.PasswordHash, acc.UsedBytes, acc.ID.String())
@@ -225,10 +243,10 @@ func (s *SQLiteStore) CreateMessage(msg *domain.Message) error {
 }
 
 func (s *SQLiteStore) GetMessageByID(id uuid.UUID) (*domain.Message, error) {
-	row := s.db.QueryRow(`SELECT id, account_id, folder, size_bytes, storage_path, subject, "from", "to", received_at FROM messages WHERE id = ?`, id.String())
+	row := s.db.QueryRow(`SELECT id, account_id, folder, size_bytes, storage_path, subject, "from", "to", received_at, read_at, deleted_at FROM messages WHERE id = ?`, id.String())
 	m := &domain.Message{}
 	var msgID, accID string
-	err := row.Scan(&msgID, &accID, &m.Folder, &m.SizeBytes, &m.StoragePath, &m.Subject, &m.From, &m.To, &m.ReceivedAt)
+	err := row.Scan(&msgID, &accID, &m.Folder, &m.SizeBytes, &m.StoragePath, &m.Subject, &m.From, &m.To, &m.ReceivedAt, &m.ReadAt, &m.DeletedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -238,7 +256,7 @@ func (s *SQLiteStore) GetMessageByID(id uuid.UUID) (*domain.Message, error) {
 }
 
 func (s *SQLiteStore) ListByAccount(accountID uuid.UUID, folder string) ([]*domain.Message, error) {
-	rows, err := s.db.Query(`SELECT id, account_id, folder, size_bytes, storage_path, subject, "from", "to", received_at FROM messages WHERE account_id = ? AND folder = ?`,
+	rows, err := s.db.Query(`SELECT id, account_id, folder, size_bytes, storage_path, subject, "from", "to", received_at, read_at, deleted_at FROM messages WHERE account_id = ? AND folder = ?`,
 		accountID.String(), folder)
 	if err != nil {
 		return nil, err
@@ -249,7 +267,7 @@ func (s *SQLiteStore) ListByAccount(accountID uuid.UUID, folder string) ([]*doma
 	for rows.Next() {
 		m := &domain.Message{}
 		var id, accID string
-		if err := rows.Scan(&id, &accID, &m.Folder, &m.SizeBytes, &m.StoragePath, &m.Subject, &m.From, &m.To, &m.ReceivedAt); err != nil {
+		if err := rows.Scan(&id, &accID, &m.Folder, &m.SizeBytes, &m.StoragePath, &m.Subject, &m.From, &m.To, &m.ReceivedAt, &m.ReadAt, &m.DeletedAt); err != nil {
 			return nil, err
 		}
 		m.ID, _ = uuid.Parse(id)

@@ -31,6 +31,7 @@ type TLSConfig struct {
 
 type SMTPConfig struct {
 	Addr            string `yaml:"addr"`
+	SubmissionAddr  string `yaml:"submission_addr"`  // Port 587
 	Domain          string `yaml:"domain"`
 	MaxMessageBytes int64  `yaml:"max_message_bytes"`
 	MaxRecipients   int    `yaml:"max_recipients"`
@@ -39,6 +40,7 @@ type SMTPConfig struct {
 
 type IMAPConfig struct {
 	Addr          string `yaml:"addr"`
+	TLSAddr       string `yaml:"tls_addr"`  // Port 993 (IMAPS)
 	AllowInsecure bool   `yaml:"allow_insecure"`
 }
 
@@ -56,14 +58,16 @@ func Default() *Config {
 			Addr: ":8080",
 		},
 		SMTP: SMTPConfig{
-			Addr:            ":2525",
+			Addr:            ":25",
+			SubmissionAddr:  ":587",
 			Domain:          "localhost",
 			MaxMessageBytes: 50 * 1024 * 1024, // 50MB
 			MaxRecipients:   50,
 			AllowInsecure:   true,
 		},
 		IMAP: IMAPConfig{
-			Addr:          ":1143",
+			Addr:          ":143",
+			TLSAddr:       ":993",
 			AllowInsecure: true,
 		},
 		DKIM: DKIMConfig{

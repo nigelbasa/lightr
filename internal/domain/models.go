@@ -91,6 +91,7 @@ type AccountRepository interface {
 	CreateAccount(acc *Account) error
 	GetAccountByID(id uuid.UUID) (*Account, error)
 	GetAccountByEmail(email string) (*Account, error)
+	GetAccountByLocalPart(domainID uuid.UUID, localPart string) (*Account, error)
 	UpdateAccount(acc *Account) error
 	DeleteAccount(id uuid.UUID) error
 }
