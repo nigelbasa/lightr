@@ -53,9 +53,10 @@ func (s *Server) Start() error {
 	srv := smtp.NewServer(s.backend)
 	srv.Addr = s.addr
 	srv.Domain = "localhost"
-	srv.WriteTimeout = 10 * time.Second
-	srv.ReadTimeout = 10 * time.Second
+	srv.WriteTimeout = 5 * time.Minute  // Allow 5 minutes for large attachments
+	srv.ReadTimeout = 5 * time.Minute   // Allow 5 minutes for large attachments
 	srv.MaxRecipients = 50
+	srv.MaxMessageBytes = 50 * 1024 * 1024 // 50MB max message size
 
 	if s.tlsConfig != nil {
 		srv.TLSConfig = s.tlsConfig
@@ -78,9 +79,10 @@ func (s *Server) StartSubmission() error {
 	srv := smtp.NewServer(s.backend)
 	srv.Addr = s.submissionAddr
 	srv.Domain = "localhost"
-	srv.WriteTimeout = 10 * time.Second
-	srv.ReadTimeout = 10 * time.Second
+	srv.WriteTimeout = 5 * time.Minute  // Allow 5 minutes for large attachments
+	srv.ReadTimeout = 5 * time.Minute   // Allow 5 minutes for large attachments
 	srv.MaxRecipients = 50
+	srv.MaxMessageBytes = 50 * 1024 * 1024 // 50MB max message size
 
 	if s.tlsConfig != nil {
 		srv.TLSConfig = s.tlsConfig

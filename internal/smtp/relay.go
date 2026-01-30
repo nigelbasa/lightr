@@ -2,10 +2,13 @@ package smtp
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"log"
 	"net"
 	"net/smtp"
 	"strings"
+	"time"
 )
 
 type Relay struct {
@@ -31,6 +34,8 @@ func (r *Relay) AddDKIMSigner(domain, selector, privateKeyPEM string) error {
 // Send delivers email to one or more recipients
 // It groups recipients by domain and sends to each domain's MX server
 func (r *Relay) Send(ctx context.Context, from string, to []string, data []byte) error {
+	log.Printf("Relay: sending email from %s to %v (size: %d bytes)", from, to, len(data))
+	
 	// 1. Extract domain from 'from' address for DKIM signing
 	fromParts := strings.Split(from, "@")
 	if len(fromParts) == 2 {
@@ -39,6 +44,9 @@ func (r *Relay) Send(ctx context.Context, from string, to []string, data []byte)
 			signedData, err := signer.Sign(data)
 			if err == nil {
 				data = signedData
+				log.Printf("Relay: DKIM signed for domain %s", fromDomain)
+			} else {
+				log.Printf("Relay: DKIM signing failed for %s: %v", fromDomain, err)
 			}
 			// If signing fails, we continue with unsigned data
 		}
@@ -65,7 +73,10 @@ func (r *Relay) Send(ctx context.Context, from string, to []string, data []byte)
 		}
 
 		if err := r.sendToDomain(ctx, from, domain, recipients, data); err != nil {
+			log.Printf("Relay: failed to send to %s: %v", domain, err)
 			errors = append(errors, fmt.Sprintf("%s: %v", domain, err))
+		} else {
+			log.Printf("Relay: successfully sent to %v at %s", recipients, domain)
 		}
 	}
 
@@ -91,6 +102,8 @@ func (r *Relay) sendToDomain(ctx context.Context, from, domain string, recipient
 		return fmt.Errorf("no mx records found")
 	}
 
+	log.Printf("Relay: found %d MX records for %s", len(mxRecords), domain)
+
 	// Try sending to MX servers in priority order
 	var lastErr error
 	for _, mx := range mxRecords {
@@ -101,12 +114,78 @@ func (r *Relay) sendToDomain(ctx context.Context, from, domain string, recipient
 		}
 
 		mxHost := strings.TrimSuffix(mx.Host, ".")
-		err := smtp.SendMail(mxHost+":25", nil, from, recipients, data)
+		log.Printf("Relay: trying MX %s (priority %d) for %s", mxHost, mx.Pref, domain)
+		
+		err := r.sendToMX(mxHost, from, recipients, data)
 		if err == nil {
 			return nil
 		}
+		log.Printf("Relay: MX %s failed: %v", mxHost, err)
 		lastErr = err
 	}
 
 	return fmt.Errorf("all MX servers failed: %v", lastErr)
+}
+
+// sendToMX sends email to a specific MX server with proper timeout and TLS support
+func (r *Relay) sendToMX(mxHost, from string, recipients []string, data []byte) error {
+	// Create a connection with timeout
+	dialer := &net.Dialer{
+		Timeout: 30 * time.Second,
+	}
+	
+	conn, err := dialer.Dial("tcp", mxHost+":25")
+	if err != nil {
+		return fmt.Errorf("connection failed: %v", err)
+	}
+	defer conn.Close()
+	
+	// Set read/write deadlines for large messages
+	deadline := time.Now().Add(5 * time.Minute)
+	conn.SetDeadline(deadline)
+	
+	client, err := smtp.NewClient(conn, mxHost)
+	if err != nil {
+		return fmt.Errorf("client creation failed: %v", err)
+	}
+	defer client.Close()
+	
+	// Try STARTTLS if available
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		tlsConfig := &tls.Config{
+			ServerName: mxHost,
+			MinVersion: tls.VersionTLS12,
+		}
+		if err := client.StartTLS(tlsConfig); err != nil {
+			log.Printf("Relay: STARTTLS failed for %s: %v (continuing without TLS)", mxHost, err)
+		}
+	}
+	
+	// Send the email
+	if err := client.Mail(from); err != nil {
+		return fmt.Errorf("MAIL FROM failed: %v", err)
+	}
+	
+	for _, rcpt := range recipients {
+		if err := client.Rcpt(rcpt); err != nil {
+			return fmt.Errorf("RCPT TO %s failed: %v", rcpt, err)
+		}
+	}
+	
+	wc, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("DATA command failed: %v", err)
+	}
+	
+	_, err = wc.Write(data)
+	if err != nil {
+		wc.Close()
+		return fmt.Errorf("data write failed: %v", err)
+	}
+	
+	if err := wc.Close(); err != nil {
+		return fmt.Errorf("data close failed: %v", err)
+	}
+	
+	return client.Quit()
 }
