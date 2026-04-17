@@ -27,7 +27,8 @@ type Domain struct {
 	Name           string    `json:"name"`
 	DKIMPrivateKey string    `json:"-"`
 	DKIMSelector   string    `json:"dkim_selector"`
-	WebhookURL     string    `json:"webhook_url,omitempty"`
+	WebhookURL     string    `json:"webhook_url,omitempty"`      // For email notifications
+	AuthWebhookURL string    `json:"auth_webhook_url,omitempty"` // For auth offloading
 	IsVerified     bool      `json:"is_verified"`
 	CreatedAt      time.Time `json:"created_at"`
 }
@@ -76,13 +77,28 @@ type TrackingEvent struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// Contact represents a contact from previous email interactions
+type Contact struct {
+	Email        string    `json:"email"`
+	DisplayName  string    `json:"display_name,omitempty"`
+	ContactCount int       `json:"contact_count"`
+	LastContact  time.Time `json:"last_contact,omitempty"`
+}
+
 // AuthService & Auth Hooks
 type AuthService interface {
 	Authenticate(ctx context.Context, username, password string) (*Account, error)
 }
 
+// AuthResult contains the result from auth offloading
+type AuthResult struct {
+	UserID      string
+	Email       string
+	DisplayName string
+}
+
 type AuthOffloader interface {
-	OffloadAuth(ctx context.Context, username, password string) (*Account, error)
+	OffloadAuth(ctx context.Context, username, password string) (*AuthResult, error)
 }
 
 // Repository Interfaces
@@ -94,6 +110,7 @@ type AccountRepository interface {
 	GetAccountByLocalPart(domainID uuid.UUID, localPart string) (*Account, error)
 	UpdateAccount(acc *Account) error
 	DeleteAccount(id uuid.UUID) error
+	SearchByDomain(domain, query string, limit int) ([]*Account, error)
 }
 
 type DomainRepository interface {

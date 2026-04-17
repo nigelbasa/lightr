@@ -74,6 +74,13 @@ type OrgRecognizer struct {
 	vipNames        []string // Names that should never come from external
 }
 
+// Contact represents a recorded email contact
+type Contact struct {
+	Email        string    `json:"email"`
+	ContactCount int       `json:"contact_count"`
+	LastContact  time.Time `json:"last_contact"`
+}
+
 // OrgRepository stores organization data
 type OrgRepository interface {
 	GetByDomain(domain string) (*Organization, error)
@@ -83,6 +90,7 @@ type OrgRepository interface {
 	List() ([]*Organization, error)
 	RecordContact(senderEmail, recipientEmail string) error
 	IsFirstContact(senderEmail, recipientEmail string) (bool, error)
+	SearchContacts(senderEmail, query string, limit int) ([]Contact, error)
 }
 
 // RecognizerConfig holds configuration
@@ -637,6 +645,37 @@ func (r *SQLiteOrgRepository) IsFirstContact(senderEmail, recipientEmail string)
 		return false, err
 	}
 	return count == 0, nil
+}
+
+// SearchContacts searches for contacts a user has interacted with
+func (r *SQLiteOrgRepository) SearchContacts(senderEmail, query string, limit int) ([]Contact, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	
+	// Search for contacts where this sender has sent emails, ordered by frequency
+	rows, err := r.db.Query(`
+		SELECT recipient_email, contact_count, last_contact
+		FROM sender_contacts
+		WHERE sender_email = ? AND recipient_email LIKE ?
+		ORDER BY contact_count DESC, last_contact DESC
+		LIMIT ?
+	`, strings.ToLower(senderEmail), "%"+strings.ToLower(query)+"%", limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	
+	var contacts []Contact
+	for rows.Next() {
+		var c Contact
+		if err := rows.Scan(&c.Email, &c.ContactCount, &c.LastContact); err != nil {
+			return nil, err
+		}
+		contacts = append(contacts, c)
+	}
+	
+	return contacts, rows.Err()
 }
 
 func (r *SQLiteOrgRepository) scanOrg(row *sql.Row) (*Organization, error) {

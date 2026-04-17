@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"time"
@@ -61,7 +62,9 @@ func (s *Service) Trigger(ctx context.Context, hookURL string, eventType EventTy
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", "Lightr-Webhook/1.0")
 
+		log.Printf("webhook: sending to %s", hookURL)
 		resp, err := s.client.Do(req)
 		if err != nil {
 			log.Printf("webhook delivery failed: %v", err)
@@ -70,7 +73,10 @@ func (s *Service) Trigger(ctx context.Context, hookURL string, eventType EventTy
 		defer resp.Body.Close()
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			log.Printf("webhook returned non-200 status: %d", resp.StatusCode)
+			body, _ := io.ReadAll(resp.Body)
+			log.Printf("webhook returned non-200 status: %d, body: %s", resp.StatusCode, string(body))
+		} else {
+			log.Printf("webhook delivered successfully to %s", hookURL)
 		}
 	}()
 }

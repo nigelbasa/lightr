@@ -3,6 +3,7 @@ package smtp
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"log"
 	"net/mail"
@@ -17,9 +18,44 @@ import (
 	"github.com/nigelbasa/lightr/internal/webhook"
 )
 
+// LoginAuthenticator is a callback function for LOGIN auth
+type LoginAuthenticator func(username, password string) error
+
+// loginServer is a SASL server for LOGIN mechanism
+type loginServer struct {
+	authenticate LoginAuthenticator
+	username     string
+	step         int
+}
+
+func newLoginServer(auth LoginAuthenticator) sasl.Server {
+	return &loginServer{authenticate: auth}
+}
+
+func (s *loginServer) Next(response []byte) (challenge []byte, done bool, err error) {
+	switch s.step {
+	case 0:
+		// Initial - send "Username:" challenge
+		s.step++
+		return []byte("Username:"), false, nil
+	case 1:
+		// Received username - send "Password:" challenge
+		s.username = string(response)
+		s.step++
+		return []byte("Password:"), false, nil
+	case 2:
+		// Received password - authenticate
+		password := string(response)
+		err := s.authenticate(s.username, password)
+		return nil, true, err
+	}
+	return nil, false, sasl.ErrUnexpectedClientResponse
+}
+
 type Server struct {
 	addr           string
 	submissionAddr string
+	domain         string
 	backend        *Backend
 	tlsConfig      *tls.Config
 }
@@ -28,7 +64,13 @@ func NewServer(addr string, backend *Backend) *Server {
 	return &Server{
 		addr:    addr,
 		backend: backend,
+		domain:  "localhost",
 	}
+}
+
+// WithDomain sets the SMTP server domain name
+func (s *Server) WithDomain(domain string) {
+	s.domain = domain
 }
 
 // WithSubmissionAddr sets the submission port (587)
@@ -49,19 +91,40 @@ func (s *Server) WithTLS(certFile, keyFile string) error {
 	return nil
 }
 
+// WithTLSMultiDomain configures TLS with SNI support for multiple domains
+func (s *Server) WithTLSMultiDomain(defaultCert, defaultKey string, domainCerts map[string]tls.Certificate) error {
+	defaultCertPair, err := tls.LoadX509KeyPair(defaultCert, defaultKey)
+	if err != nil {
+		return err
+	}
+	s.tlsConfig = &tls.Config{
+		Certificates: []tls.Certificate{defaultCertPair},
+		GetCertificate: func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			if cert, ok := domainCerts[info.ServerName]; ok {
+				log.Printf("SNI: Using certificate for %s", info.ServerName)
+				return &cert, nil
+			}
+			log.Printf("SNI: Using default certificate for %s", info.ServerName)
+			return &defaultCertPair, nil
+		},
+		MinVersion: tls.VersionTLS12,
+	}
+	return nil
+}
+
 func (s *Server) Start() error {
 	srv := smtp.NewServer(s.backend)
 	srv.Addr = s.addr
-	srv.Domain = "localhost"
-	srv.WriteTimeout = 5 * time.Minute  // Allow 5 minutes for large attachments
-	srv.ReadTimeout = 5 * time.Minute   // Allow 5 minutes for large attachments
+	srv.Domain = s.domain
+	srv.WriteTimeout = 5 * time.Minute // Allow 5 minutes for large attachments
+	srv.ReadTimeout = 5 * time.Minute  // Allow 5 minutes for large attachments
 	srv.MaxRecipients = 50
 	srv.MaxMessageBytes = 50 * 1024 * 1024 // 50MB max message size
 
 	if s.tlsConfig != nil {
 		srv.TLSConfig = s.tlsConfig
 		srv.AllowInsecureAuth = false
-		log.Printf("Starting SMTP server at %s with STARTTLS", s.addr)
+		log.Printf("Starting SMTP server at %s with STARTTLS (domain: %s)", s.addr, s.domain)
 	} else {
 		srv.AllowInsecureAuth = true
 		log.Printf("Starting SMTP server at %s (insecure)", s.addr)
@@ -78,16 +141,16 @@ func (s *Server) StartSubmission() error {
 
 	srv := smtp.NewServer(s.backend)
 	srv.Addr = s.submissionAddr
-	srv.Domain = "localhost"
-	srv.WriteTimeout = 5 * time.Minute  // Allow 5 minutes for large attachments
-	srv.ReadTimeout = 5 * time.Minute   // Allow 5 minutes for large attachments
+	srv.Domain = s.domain
+	srv.WriteTimeout = 5 * time.Minute // Allow 5 minutes for large attachments
+	srv.ReadTimeout = 5 * time.Minute  // Allow 5 minutes for large attachments
 	srv.MaxRecipients = 50
 	srv.MaxMessageBytes = 50 * 1024 * 1024 // 50MB max message size
 
 	if s.tlsConfig != nil {
 		srv.TLSConfig = s.tlsConfig
 		srv.AllowInsecureAuth = false
-		log.Printf("Starting SMTP submission server at %s with STARTTLS", s.submissionAddr)
+		log.Printf("Starting SMTP submission server at %s with STARTTLS (domain: %s)", s.submissionAddr, s.domain)
 	} else {
 		srv.AllowInsecureAuth = true
 		log.Printf("Starting SMTP submission server at %s (insecure)", s.submissionAddr)
@@ -97,13 +160,14 @@ func (s *Server) StartSubmission() error {
 }
 
 type Backend struct {
-	AccountRepo    domain.AccountRepository
-	DomainRepo     domain.DomainRepository
-	BlobStorage    domain.BlobStorage
-	MessageRepo    domain.MessageRepository
-	AuthService    domain.AuthService
-	WebhookService *webhook.Service
-	Relay          *Relay
+	AccountRepo      domain.AccountRepository
+	DomainRepo       domain.DomainRepository
+	BlobStorage      domain.BlobStorage
+	MessageRepo      domain.MessageRepository
+	AuthService      domain.AuthService
+	WebhookService   *webhook.Service
+	GlobalWebhookURL string // Global webhook URL from config
+	Relay            *Relay
 }
 
 func (bkd *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
@@ -124,14 +188,29 @@ func (s *Session) AuthMechanisms() []string {
 
 // Auth handles authentication using SASL
 func (s *Session) Auth(mech string) (sasl.Server, error) {
-	return sasl.NewPlainServer(func(identity, username, password string) error {
+	log.Printf("SMTP Auth: mechanism=%s", mech)
+	authCallback := func(username, password string) error {
+		log.Printf("SMTP Auth: attempting auth for user=%s", username)
 		acc, err := s.backend.AuthService.Authenticate(context.Background(), username, password)
 		if err != nil {
+			log.Printf("SMTP Auth: auth failed for user=%s: %v", username, err)
 			return smtp.ErrAuthFailed
 		}
+		log.Printf("SMTP Auth: auth succeeded for user=%s", username)
 		s.account = acc
 		return nil
-	}), nil
+	}
+
+	switch mech {
+	case sasl.Login:
+		return newLoginServer(authCallback), nil
+	case sasl.Plain:
+		return sasl.NewPlainServer(func(identity, username, password string) error {
+			return authCallback(username, password)
+		}), nil
+	default:
+		return nil, smtp.ErrAuthUnsupported
+	}
 }
 
 func (s *Session) AuthPlain(username, password string) error {
@@ -178,6 +257,11 @@ func (s *Session) Data(r io.Reader) error {
 
 	// If authenticated (submission), this is outgoing mail - queue for delivery
 	if s.account != nil {
+		// Rewrite From header to include display name if available
+		if s.account.DisplayName != "" {
+			data = s.rewriteFromHeader(data, s.account.DisplayName, s.from)
+		}
+
 		// Outgoing mail - queue for external delivery
 		for _, rcpt := range s.to {
 			if err := s.backend.Relay.Send(context.Background(), s.from, []string{rcpt}, data); err != nil {
@@ -241,15 +325,52 @@ func (s *Session) Data(r io.Reader) error {
 		msgs, _ := s.backend.MessageRepo.ListByAccount(acc.ID, "INBOX")
 		imapbackend.GetIdleNotifier().NotifyNewMail(acc.ID, uint32(len(msgs)))
 
-		// Trigger webhook
-		if dom.WebhookURL != "" {
-			s.backend.WebhookService.Trigger(context.Background(), dom.WebhookURL, webhook.EventEmailReceived, domainMsg)
+		// Trigger webhook - use domain-specific URL or global fallback
+		webhookURL := dom.WebhookURL
+		if webhookURL == "" {
+			webhookURL = s.backend.GlobalWebhookURL
+		}
+		if webhookURL != "" && s.backend.WebhookService != nil {
+			s.backend.WebhookService.Trigger(context.Background(), webhookURL, webhook.EventEmailReceived, map[string]interface{}{
+				"message_id": domainMsg.ID,
+				"account_id": acc.ID,
+				"email":      rcpt,
+				"from":       fromHeader,
+				"subject":    subject,
+				"received":   domainMsg.ReceivedAt,
+			})
 		}
 
 		log.Printf("Delivered mail from %s to %s", s.from, rcpt)
 	}
 
 	return nil
+}
+
+// rewriteFromHeader rewrites the From header to include the display name
+func (s *Session) rewriteFromHeader(data []byte, displayName, email string) []byte {
+	content := string(data)
+
+	// Build the new From header with display name
+	// Format: "Display Name" <email@domain.com>
+	newFromHeader := fmt.Sprintf("From: \"%s\" <%s>", displayName, email)
+
+	// Find and replace the From header
+	// Handle various formats: From: email, From: <email>, From: "Name" <email>
+	lines := strings.Split(content, "\r\n")
+	for i, line := range lines {
+		if strings.HasPrefix(strings.ToLower(line), "from:") {
+			lines[i] = newFromHeader
+			log.Printf("Rewrote From header: %s -> %s", line, newFromHeader)
+			break
+		}
+		// Empty line means end of headers
+		if line == "" {
+			break
+		}
+	}
+
+	return []byte(strings.Join(lines, "\r\n"))
 }
 
 func (s *Session) Reset() {

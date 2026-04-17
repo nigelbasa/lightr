@@ -7,13 +7,19 @@ import (
 )
 
 type Config struct {
-	DataDir string     `yaml:"data_dir"`
-	HTTP    HTTPConfig `yaml:"http"`
-	SMTP    SMTPConfig `yaml:"smtp"`
-	IMAP    IMAPConfig `yaml:"imap"`
-	DKIM    DKIMConfig `yaml:"dkim"`
-	API     APIConfig  `yaml:"api"`
-	TLS     TLSConfig  `yaml:"tls"`
+	DataDir string        `yaml:"data_dir"`
+	HTTP    HTTPConfig    `yaml:"http"`
+	SMTP    SMTPConfig    `yaml:"smtp"`
+	IMAP    IMAPConfig    `yaml:"imap"`
+	DKIM    DKIMConfig    `yaml:"dkim"`
+	API     APIConfig     `yaml:"api"`
+	TLS     TLSConfig     `yaml:"tls"`
+	Webhook WebhookConfig `yaml:"webhook"`
+}
+
+type WebhookConfig struct {
+	URL     string `yaml:"url"` // Global webhook URL for all email events
+	Enabled bool   `yaml:"enabled"`
 }
 
 type HTTPConfig struct {
@@ -25,13 +31,20 @@ type APIConfig struct {
 }
 
 type TLSConfig struct {
+	CertFile    string                      `yaml:"cert_file"`    // Default cert
+	KeyFile     string                      `yaml:"key_file"`     // Default key
+	DomainCerts map[string]DomainCertConfig `yaml:"domain_certs"` // Per-domain certs for SNI
+}
+
+// DomainCertConfig holds TLS certificate paths for a specific domain
+type DomainCertConfig struct {
 	CertFile string `yaml:"cert_file"`
 	KeyFile  string `yaml:"key_file"`
 }
 
 type SMTPConfig struct {
 	Addr            string `yaml:"addr"`
-	SubmissionAddr  string `yaml:"submission_addr"`  // Port 587
+	SubmissionAddr  string `yaml:"submission_addr"` // Port 587
 	Domain          string `yaml:"domain"`
 	MaxMessageBytes int64  `yaml:"max_message_bytes"`
 	MaxRecipients   int    `yaml:"max_recipients"`
@@ -40,7 +53,7 @@ type SMTPConfig struct {
 
 type IMAPConfig struct {
 	Addr          string `yaml:"addr"`
-	TLSAddr       string `yaml:"tls_addr"`  // Port 993 (IMAPS)
+	TLSAddr       string `yaml:"tls_addr"` // Port 993 (IMAPS)
 	AllowInsecure bool   `yaml:"allow_insecure"`
 }
 

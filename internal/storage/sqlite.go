@@ -49,6 +49,7 @@ func (s *SQLiteStore) init() error {
 		dkim_private_key TEXT,
 		dkim_selector TEXT,
 		webhook_url TEXT,
+		auth_webhook_url TEXT,
 		is_verified BOOLEAN DEFAULT 0,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY(org_id) REFERENCES organizations(id)
@@ -58,6 +59,7 @@ func (s *SQLiteStore) init() error {
 		id TEXT PRIMARY KEY,
 		domain_id TEXT NOT NULL,
 		local_part TEXT NOT NULL,
+		display_name TEXT,
 		auth_mode TEXT NOT NULL,
 		password_hash TEXT,
 		external_id TEXT,
@@ -114,39 +116,43 @@ func (s *SQLiteStore) init() error {
 
 // DomainRepository implementation
 func (s *SQLiteStore) CreateDomain(dom *domain.Domain) error {
-	_, err := s.db.Exec(`INSERT INTO domains (id, org_id, name, dkim_private_key, dkim_selector, webhook_url, is_verified) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		dom.ID.String(), dom.OrgID.String(), dom.Name, dom.DKIMPrivateKey, dom.DKIMSelector, dom.WebhookURL, dom.IsVerified)
+	_, err := s.db.Exec(`INSERT INTO domains (id, org_id, name, dkim_private_key, dkim_selector, webhook_url, auth_webhook_url, is_verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		dom.ID.String(), dom.OrgID.String(), dom.Name, dom.DKIMPrivateKey, dom.DKIMSelector, dom.WebhookURL, dom.AuthWebhookURL, dom.IsVerified)
 	return err
 }
 
 func (s *SQLiteStore) GetDomainByName(name string) (*domain.Domain, error) {
-	row := s.db.QueryRow(`SELECT id, org_id, name, dkim_selector, webhook_url, is_verified FROM domains WHERE name = ?`, name)
+	row := s.db.QueryRow(`SELECT id, org_id, name, dkim_selector, webhook_url, auth_webhook_url, is_verified FROM domains WHERE name = ?`, name)
 	d := &domain.Domain{}
 	var id, orgID string
-	err := row.Scan(&id, &orgID, &d.Name, &d.DKIMSelector, &d.WebhookURL, &d.IsVerified)
+	var authWebhookURL sql.NullString
+	err := row.Scan(&id, &orgID, &d.Name, &d.DKIMSelector, &d.WebhookURL, &authWebhookURL, &d.IsVerified)
 	if err != nil {
 		return nil, err
 	}
 	d.ID, _ = uuid.Parse(id)
 	d.OrgID, _ = uuid.Parse(orgID)
+	d.AuthWebhookURL = authWebhookURL.String
 	return d, nil
 }
 
 func (s *SQLiteStore) GetDomainByID(id uuid.UUID) (*domain.Domain, error) {
-	row := s.db.QueryRow(`SELECT id, org_id, name, dkim_selector, webhook_url, is_verified FROM domains WHERE id = ?`, id.String())
+	row := s.db.QueryRow(`SELECT id, org_id, name, dkim_selector, webhook_url, auth_webhook_url, is_verified FROM domains WHERE id = ?`, id.String())
 	d := &domain.Domain{}
 	var domID, orgID string
-	err := row.Scan(&domID, &orgID, &d.Name, &d.DKIMSelector, &d.WebhookURL, &d.IsVerified)
+	var authWebhookURL sql.NullString
+	err := row.Scan(&domID, &orgID, &d.Name, &d.DKIMSelector, &d.WebhookURL, &authWebhookURL, &d.IsVerified)
 	if err != nil {
 		return nil, err
 	}
 	d.ID, _ = uuid.Parse(domID)
 	d.OrgID, _ = uuid.Parse(orgID)
+	d.AuthWebhookURL = authWebhookURL.String
 	return d, nil
 }
 
 func (s *SQLiteStore) ListDomainsByOrg(orgID uuid.UUID) ([]*domain.Domain, error) {
-	rows, err := s.db.Query(`SELECT id, org_id, name, dkim_selector, webhook_url, is_verified FROM domains WHERE org_id = ?`, orgID.String())
+	rows, err := s.db.Query(`SELECT id, org_id, name, dkim_selector, webhook_url, auth_webhook_url, is_verified FROM domains WHERE org_id = ?`, orgID.String())
 	if err != nil {
 		return nil, err
 	}
@@ -156,11 +162,13 @@ func (s *SQLiteStore) ListDomainsByOrg(orgID uuid.UUID) ([]*domain.Domain, error
 	for rows.Next() {
 		d := &domain.Domain{}
 		var id, oid string
-		if err := rows.Scan(&id, &oid, &d.Name, &d.DKIMSelector, &d.WebhookURL, &d.IsVerified); err != nil {
+		var authWebhookURL sql.NullString
+		if err := rows.Scan(&id, &oid, &d.Name, &d.DKIMSelector, &d.WebhookURL, &authWebhookURL, &d.IsVerified); err != nil {
 			return nil, err
 		}
 		d.ID, _ = uuid.Parse(id)
 		d.OrgID, _ = uuid.Parse(oid)
+		d.AuthWebhookURL = authWebhookURL.String
 		domains = append(domains, d)
 	}
 	return domains, nil
@@ -174,10 +182,10 @@ func (s *SQLiteStore) CreateAccount(acc *domain.Account) error {
 }
 
 func (s *SQLiteStore) GetAccountByID(id uuid.UUID) (*domain.Account, error) {
-	row := s.db.QueryRow(`SELECT id, domain_id, local_part, auth_mode, password_hash, external_id, quota_bytes, used_bytes FROM accounts WHERE id = ?`, id.String())
+	row := s.db.QueryRow(`SELECT id, domain_id, local_part, COALESCE(display_name, ''), auth_mode, password_hash, external_id, quota_bytes, used_bytes FROM accounts WHERE id = ?`, id.String())
 	acc := &domain.Account{}
 	var accID, domID, authMode string
-	err := row.Scan(&accID, &domID, &acc.LocalPart, &authMode, &acc.PasswordHash, &acc.ExternalID, &acc.QuotaBytes, &acc.UsedBytes)
+	err := row.Scan(&accID, &domID, &acc.LocalPart, &acc.DisplayName, &authMode, &acc.PasswordHash, &acc.ExternalID, &acc.QuotaBytes, &acc.UsedBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -189,20 +197,30 @@ func (s *SQLiteStore) GetAccountByID(id uuid.UUID) (*domain.Account, error) {
 
 func (s *SQLiteStore) GetAccountByEmail(email string) (*domain.Account, error) {
 	row := s.db.QueryRow(`
-		SELECT a.id, a.domain_id, a.local_part, a.auth_mode, a.password_hash, a.external_id, a.quota_bytes, a.used_bytes 
+		SELECT a.id, a.domain_id, a.local_part, COALESCE(a.display_name, ''), a.auth_mode, a.password_hash, a.external_id, a.quota_bytes, a.used_bytes 
 		FROM accounts a
 		JOIN domains d ON a.domain_id = d.id
 		WHERE (a.local_part || '@' || d.name) = ?`, email)
 
 	acc := &domain.Account{}
 	var accID, domID, authMode string
-	err := row.Scan(&accID, &domID, &acc.LocalPart, &authMode, &acc.PasswordHash, &acc.ExternalID, &acc.QuotaBytes, &acc.UsedBytes)
+	var passwordHash, externalID sql.NullString
+	var quotaBytes, usedBytes sql.NullInt64
+	err := row.Scan(&accID, &domID, &acc.LocalPart, &acc.DisplayName, &authMode, &passwordHash, &externalID, &quotaBytes, &usedBytes)
 	if err != nil {
 		return nil, err
 	}
 	acc.ID, _ = uuid.Parse(accID)
 	acc.DomainID, _ = uuid.Parse(domID)
 	acc.AuthMode = domain.AuthMode(authMode)
+	acc.PasswordHash = passwordHash.String
+	acc.ExternalID = externalID.String
+	if quotaBytes.Valid {
+		acc.QuotaBytes = quotaBytes.Int64
+	}
+	if usedBytes.Valid {
+		acc.UsedBytes = usedBytes.Int64
+	}
 	return acc, nil
 }
 
@@ -214,19 +232,25 @@ func (s *SQLiteStore) GetAccountByLocalPart(domainID uuid.UUID, localPart string
 
 	acc := &domain.Account{}
 	var accID, domID, authMode string
-	err := row.Scan(&accID, &domID, &acc.LocalPart, &authMode, &acc.PasswordHash, &acc.ExternalID, &acc.QuotaBytes, &acc.UsedBytes)
+	var passwordHash, externalID sql.NullString
+	var quotaBytes, usedBytes sql.NullInt64
+	err := row.Scan(&accID, &domID, &acc.LocalPart, &authMode, &passwordHash, &externalID, &quotaBytes, &usedBytes)
 	if err != nil {
 		return nil, err
 	}
 	acc.ID, _ = uuid.Parse(accID)
 	acc.DomainID, _ = uuid.Parse(domID)
 	acc.AuthMode = domain.AuthMode(authMode)
+	acc.PasswordHash = passwordHash.String
+	acc.ExternalID = externalID.String
+	acc.QuotaBytes = quotaBytes.Int64
+	acc.UsedBytes = usedBytes.Int64
 	return acc, nil
 }
 
 func (s *SQLiteStore) UpdateAccount(acc *domain.Account) error {
-	_, err := s.db.Exec(`UPDATE accounts SET password_hash = ?, used_bytes = ? WHERE id = ?`,
-		acc.PasswordHash, acc.UsedBytes, acc.ID.String())
+	_, err := s.db.Exec(`UPDATE accounts SET password_hash = ?, used_bytes = ?, display_name = ? WHERE id = ?`,
+		acc.PasswordHash, acc.UsedBytes, acc.DisplayName, acc.ID.String())
 	return err
 }
 
@@ -235,10 +259,46 @@ func (s *SQLiteStore) DeleteAccount(id uuid.UUID) error {
 	return err
 }
 
+// SearchByDomain searches for accounts in a domain matching a query
+func (s *SQLiteStore) SearchByDomain(domainName, query string, limit int) ([]*domain.Account, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	
+	rows, err := s.db.Query(`
+		SELECT a.id, a.domain_id, a.local_part, COALESCE(a.display_name, ''), a.auth_mode 
+		FROM accounts a
+		JOIN domains d ON a.domain_id = d.id
+		WHERE d.name = ? AND (a.local_part LIKE ? OR a.display_name LIKE ?)
+		LIMIT ?
+	`, domainName, "%"+query+"%", "%"+query+"%", limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var accounts []*domain.Account
+	for rows.Next() {
+		acc := &domain.Account{}
+		var accID, domID, authMode string
+		if err := rows.Scan(&accID, &domID, &acc.LocalPart, &acc.DisplayName, &authMode); err != nil {
+			return nil, err
+		}
+		acc.ID, _ = uuid.Parse(accID)
+		acc.DomainID, _ = uuid.Parse(domID)
+		acc.AuthMode = domain.AuthMode(authMode)
+		
+		// Build email from local_part and domain
+		acc.Email = acc.LocalPart + "@" + domainName
+		accounts = append(accounts, acc)
+	}
+	return accounts, nil
+}
+
 // MessageRepository implementation
 func (s *SQLiteStore) CreateMessage(msg *domain.Message) error {
-	_, err := s.db.Exec(`INSERT INTO messages (id, account_id, folder, size_bytes, storage_path, subject, "from", "to") VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		msg.ID.String(), msg.AccountID.String(), msg.Folder, msg.SizeBytes, msg.StoragePath, msg.Subject, msg.From, msg.To)
+	_, err := s.db.Exec(`INSERT INTO messages (id, account_id, folder, size_bytes, storage_path, subject, "from", "to", received_at, read_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		msg.ID.String(), msg.AccountID.String(), msg.Folder, msg.SizeBytes, msg.StoragePath, msg.Subject, msg.From, msg.To, msg.ReceivedAt, msg.ReadAt)
 	return err
 }
 

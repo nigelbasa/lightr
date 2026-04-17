@@ -18,6 +18,7 @@ smtp:
 # IMAP server (email client access)
 imap:
   addr: ":1143"              # Use :143 (or :993 for TLS) in production
+  tls_addr: ":993"           # IMAPS port with implicit TLS
   allow_insecure: true       # Set to false in production, use TLS
 
 # DKIM signing configuration
@@ -25,3 +26,21 @@ dkim:
   selector: "default"        # DKIM selector (e.g., "default" -> default._domainkey.yourdomain.com)
   key_bits: 2048             # RSA key size
   # private_key_path: ""     # Path to DKIM private key (generated if not provided)
+
+# TLS configuration
+tls:
+  # Default certificate (used as fallback for SNI)
+  cert_file: "/etc/letsencrypt/live/mail.example.com/fullchain.pem"
+  key_file: "/etc/letsencrypt/live/mail.example.com/privkey.pem"
+  
+  # Per-domain certificates for SNI (optional, enables multi-domain support)
+  # When clients connect, the server selects the right certificate based on
+  # the domain they request (Server Name Indication)
+  # domain_certs:
+  #   bounces.inzwi.app:
+  #     cert_file: "/etc/letsencrypt/live/bounces.inzwi.app/fullchain.pem"
+  #     key_file: "/etc/letsencrypt/live/bounces.inzwi.app/privkey.pem"
+  #   mail.nyanhewepry.ac.zw:
+  #     cert_file: "/etc/letsencrypt/live/mail.nyanhewepry.ac.zw/fullchain.pem"
+  #     key_file: "/etc/letsencrypt/live/mail.nyanhewepry.ac.zw/privkey.pem"
+

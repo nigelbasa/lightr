@@ -13,12 +13,20 @@ import (
 
 type Relay struct {
 	dkimSigners map[string]*DKIMSigner // domain -> signer
+	hostname    string                  // HELO/EHLO hostname
 }
 
 func NewRelay() *Relay {
 	return &Relay{
 		dkimSigners: make(map[string]*DKIMSigner),
+		hostname:    "localhost",
 	}
+}
+
+// WithHostname sets the HELO/EHLO hostname for outbound connections
+func (r *Relay) WithHostname(hostname string) *Relay {
+	r.hostname = hostname
+	return r
 }
 
 // AddDKIMSigner registers a DKIM signer for a specific domain
@@ -149,6 +157,11 @@ func (r *Relay) sendToMX(mxHost, from string, recipients []string, data []byte) 
 		return fmt.Errorf("client creation failed: %v", err)
 	}
 	defer client.Close()
+	
+	// Send proper HELO/EHLO with our hostname
+	if err := client.Hello(r.hostname); err != nil {
+		return fmt.Errorf("HELO failed: %v", err)
+	}
 	
 	// Try STARTTLS if available
 	if ok, _ := client.Extension("STARTTLS"); ok {
