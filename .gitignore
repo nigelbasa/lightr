@@ -1,5 +1,8 @@
 # Binaries
 lightr
+lightr-linux
+lightr-linux-amd64
+
 *.exe
 *.dll
 *.so
