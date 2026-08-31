@@ -144,6 +144,21 @@ def _cell(value: Any) -> str:
     return str(value)
 
 
+def raw(content: str) -> None:
+    """Write content to stdout byte-for-byte.
+
+    Rich wraps to the terminal width -- and to a default width when
+    piped -- which silently corrupts anything meant to be a file. Every
+    generated config, Sieve script, and raw message source goes through
+    here instead, so `lightr dovecot config > 99-lightr.conf` produces
+    a file Dovecot can actually parse.
+    """
+    sys.stdout.write(content)
+    if content and not content.endswith("\n"):
+        sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
 def success(message: str) -> None:
     stderr.print(f"[green]OK[/green] {message}")
 
@@ -183,6 +198,7 @@ __all__ = [
     "human_size",
     "info",
     "plain",
+    "raw",
     "render",
     "secret",
     "stderr",

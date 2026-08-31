@@ -146,7 +146,7 @@ def read_message(
     message = run(_run)
 
     if raw:
-        output.stdout.print(message.raw.decode("utf-8", "replace"), highlight=False)
+        output.raw(message.raw.decode("utf-8", "replace"))
         return
 
     if fmt is not None and fmt is not Format.TABLE:
@@ -189,7 +189,10 @@ def read_message(
     if not headers_only:
         body = message.html if (html and message.html) else message.text
         output.stdout.print()
-        output.stdout.print(body or "[dim](no text body)[/dim]", highlight=False)
+        if body:
+            output.raw(body)
+        else:
+            output.stderr.print("[dim](no text body)[/dim]")
 
 
 @app.command("attachments")

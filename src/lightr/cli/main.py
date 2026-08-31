@@ -15,7 +15,7 @@ import typer
 
 from lightr import __version__
 
-from . import accounts, mailbox, output, resources
+from . import accounts, dovecot, mailbox, output, resources
 from .context import db, run, state
 from .output import Format
 
@@ -31,6 +31,7 @@ app.add_typer(resources.domain_app, name="domain")
 app.add_typer(accounts.app, name="account")
 app.add_typer(resources.alias_app, name="alias")
 app.add_typer(mailbox.app, name="mailbox")
+app.add_typer(dovecot.app, name="dovecot")
 
 
 def _version(value: bool) -> None:
