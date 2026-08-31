@@ -53,7 +53,7 @@ dev = [
 ]
 
 [project.scripts]
-lightr = "lightr.cli.main:app"
+lightr = "lightr.cli.main:entrypoint"
 
 [project.urls]
 Homepage = "https://github.com/nigelbasa/lightr"

@@ -331,7 +331,7 @@ class AccountRepo:
         await self._conn.execute(
             update(schema.accounts)
             .where(schema.accounts.c.id == str(account_id))
-            .values(password_hash=password_hash, auth_mode=str("native"))
+            .values(password_hash=password_hash, auth_mode="native")
         )
 
     async def delete(self, account_id: UUID) -> None:

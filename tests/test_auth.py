@@ -9,8 +9,8 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from lightr.auth import (
-    AuthFailure,
     Authenticator,
+    AuthFailure,
     PasswordError,
     generate_password,
     hash_password,

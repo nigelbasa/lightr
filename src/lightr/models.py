@@ -13,7 +13,7 @@ from enum import StrEnum
 from typing import Any, Self
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
 
 def _now() -> datetime:
@@ -125,8 +125,10 @@ class Account(_Record):
             raise ValueError("local part must not contain whitespace")
         return local
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def email(self) -> str | None:
+        """The full address. Computed, so it appears in model_dump()."""
         if self.domain_name is None:
             return None
         return f"{self.local_part}@{self.domain_name}"

@@ -307,10 +307,10 @@ def compile_script(rules: Iterable[Rule]) -> Script:
 
 
 __all__ = [
+    "LIGHTR_EVALUATED",
     "Action",
     "Condition",
     "Field",
-    "LIGHTR_EVALUATED",
     "MatchType",
     "Operator",
     "Rule",

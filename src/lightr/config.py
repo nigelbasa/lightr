@@ -38,7 +38,7 @@ class DatabaseDriver(StrEnum):
 
 class ServerConfig(_Base):
     hostname: str = "localhost"
-    bind_address: str = "0.0.0.0"  # noqa: S104 - a mail server binds publicly by design
+    bind_address: str = "0.0.0.0"
 
 
 class DatabaseConfig(_Base):
@@ -106,6 +106,18 @@ class DovecotConfig(_Base):
     imap_use_tls: bool = False
     imap_pool_size: int = 8
     imap_idle_timeout_seconds: int = 60
+
+    # Dovecot master user. Lets Lightr open any mailbox for the API and
+    # the CLI without holding users' own passwords -- authenticating as
+    # "user*master_user" with the master password. Configure the
+    # matching passdb entry in Dovecot; without it, mailbox reads are
+    # unavailable and Lightr says so rather than failing obscurely.
+    master_user: str = ""
+    master_password: str = ""
+
+    @property
+    def has_master_user(self) -> bool:
+        return bool(self.master_user and self.master_password)
 
     # Admin.
     doveadm_url: str = "http://127.0.0.1:8080/doveadm/v1"
