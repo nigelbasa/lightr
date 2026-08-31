@@ -26,7 +26,6 @@ const (
 	ProviderLDAP      AuthProvider = "ldap"
 	ProviderOAuth2    AuthProvider = "oauth2"
 	ProviderOIDC      AuthProvider = "oidc"
-	ProviderSAML      AuthProvider = "saml"
 	ProviderWebhook   AuthProvider = "webhook"
 	ProviderRadius    AuthProvider = "radius"
 	ProviderKerberos  AuthProvider = "kerberos"
@@ -108,22 +107,6 @@ type OAuth2Config struct {
 	
 	// Hosted domain restriction (Google)
 	HostedDomain   string   `json:"hosted_domain,omitempty"`
-}
-
-// SAMLConfig holds SAML-specific configuration
-type SAMLConfig struct {
-	EntityID         string `json:"entity_id"`
-	SSOURL           string `json:"sso_url"`
-	SLOURL           string `json:"slo_url,omitempty"`
-	Certificate      string `json:"certificate"`       // IdP certificate
-	PrivateKey       string `json:"private_key"`       // SP private key
-	SPCertificate    string `json:"sp_certificate"`    // SP certificate
-	ACSPath          string `json:"acs_path"`          // Assertion Consumer Service path
-	EmailAttr        string `json:"email_attr"`
-	DisplayNameAttr  string `json:"display_name_attr"`
-	GroupsAttr       string `json:"groups_attr"`
-	SignRequests     bool   `json:"sign_requests"`
-	WantAssertionsSigned bool `json:"want_assertions_signed"`
 }
 
 // WebhookConfig holds webhook-specific configuration
@@ -214,8 +197,6 @@ func (m *OffloadManager) RegisterProvider(ctx context.Context, config *ProviderC
 		provider, err = NewLDAPOffloader(config)
 	case ProviderOAuth2, ProviderOIDC:
 		provider, err = NewOAuth2Offloader(config)
-	case ProviderSAML:
-		provider, err = NewSAMLOffloader(config)
 	case ProviderWebhook:
 		provider, err = NewWebhookOffloader(config)
 	default:

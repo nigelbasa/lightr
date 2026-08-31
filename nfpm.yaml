@@ -12,7 +12,7 @@ maintainer: Nigel Basa <nigel@example.com>
 description: |
   Lightweight embeddable email server with SMTP, IMAP, and REST API.
   Features include DKIM signing, TLS support, email queue with retries,
-  and multi-tenant organization support.
+  and optional advanced tenancy scoping.
 vendor: Lightr
 homepage: https://github.com/nigelbasa/lightr
 license: MIT

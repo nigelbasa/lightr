@@ -21,6 +21,19 @@ type DKIMSigner struct {
 }
 
 func NewDKIMSigner(domain, selector, pemKey string) (*DKIMSigner, error) {
+	key, err := parseDKIMPrivateKey(pemKey)
+	if err != nil {
+		return nil, err
+	}
+
+	return &DKIMSigner{
+		domain:   domain,
+		selector: selector,
+		privKey:  key,
+	}, nil
+}
+
+func parseDKIMPrivateKey(pemKey string) (*rsa.PrivateKey, error) {
 	block, _ := pem.Decode([]byte(pemKey))
 	if block == nil {
 		return nil, errors.New("failed to decode PEM block")
@@ -39,12 +52,15 @@ func NewDKIMSigner(domain, selector, pemKey string) (*DKIMSigner, error) {
 			return nil, errors.New("unsupported private key type (only RSA supported for now)")
 		}
 	}
+	return key, nil
+}
 
-	return &DKIMSigner{
-		domain:   domain,
-		selector: selector,
-		privKey:  key,
-	}, nil
+func DKIMPublicKeyBytesFromPrivateKey(pemKey string) ([]byte, error) {
+	key, err := parseDKIMPrivateKey(pemKey)
+	if err != nil {
+		return nil, err
+	}
+	return x509.MarshalPKIXPublicKey(&key.PublicKey)
 }
 
 func (s *DKIMSigner) Sign(msg []byte) ([]byte, error) {

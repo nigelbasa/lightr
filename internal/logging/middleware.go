@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"net"
 	"net/http"
 	"time"
 
@@ -69,14 +70,11 @@ func (w *responseWriter) Write(b []byte) (int, error) {
 }
 
 func getClientIP(r *http.Request) string {
-	// Check forwarded headers
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return xff
+	remoteAddr := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		return host
 	}
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return xri
-	}
-	return r.RemoteAddr
+	return remoteAddr
 }
 
 // SMTPLogger provides SMTP-specific logging

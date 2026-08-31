@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,11 +23,11 @@ import (
 // Webhook system for analytics, bounces, delivery notifications, and email receipt
 
 var (
-	ErrWebhookNotFound     = errors.New("webhook not found")
-	ErrWebhookDisabled     = errors.New("webhook disabled")
-	ErrDeliveryFailed      = errors.New("webhook delivery failed")
-	ErrMaxRetriesExceeded  = errors.New("max retries exceeded")
-	ErrInvalidSignature    = errors.New("invalid webhook signature")
+	ErrWebhookNotFound    = errors.New("webhook not found")
+	ErrWebhookDisabled    = errors.New("webhook disabled")
+	ErrDeliveryFailed     = errors.New("webhook delivery failed")
+	ErrMaxRetriesExceeded = errors.New("max retries exceeded")
+	ErrInvalidSignature   = errors.New("invalid webhook signature")
 )
 
 // EventType represents a webhook event type
@@ -34,104 +35,101 @@ type EventType string
 
 const (
 	// Email lifecycle events
-	EventEmailReceived    EventType = "email.received"
-	EventEmailSent        EventType = "email.sent"
-	EventEmailDelivered   EventType = "email.delivered"
-	EventEmailOpened      EventType = "email.opened"
-	EventEmailClicked     EventType = "email.clicked"
-	EventEmailBounced     EventType = "email.bounced"
-	EventEmailComplaint   EventType = "email.complaint"
-	EventEmailUnsubscribe EventType = "email.unsubscribe"
-	EventEmailDeferred    EventType = "email.deferred"
-	EventEmailDropped     EventType = "email.dropped"
-	
+	EventEmailReceived  EventType = "email.received"
+	EventEmailSent      EventType = "email.sent"
+	EventEmailDelivered EventType = "email.delivered"
+	EventEmailBounced   EventType = "email.bounced"
+	EventEmailComplaint EventType = "email.complaint"
+	EventEmailDeferred  EventType = "email.deferred"
+	EventEmailDropped   EventType = "email.dropped"
+
 	// Bounce types
-	EventBounceHard       EventType = "bounce.hard"
-	EventBounceSoft       EventType = "bounce.soft"
-	EventBounceBlock      EventType = "bounce.block"
-	
+	EventBounceHard  EventType = "bounce.hard"
+	EventBounceSoft  EventType = "bounce.soft"
+	EventBounceBlock EventType = "bounce.block"
+
 	// Analytics events
 	EventAnalyticsDaily   EventType = "analytics.daily"
 	EventAnalyticsWeekly  EventType = "analytics.weekly"
 	EventAnalyticsMonthly EventType = "analytics.monthly"
-	
+
 	// System events
-	EventSystemHealth     EventType = "system.health"
-	EventSystemAlert      EventType = "system.alert"
-	EventQuotaWarning     EventType = "quota.warning"
-	EventQuotaExceeded    EventType = "quota.exceeded"
-	
+	EventSystemHealth  EventType = "system.health"
+	EventSystemAlert   EventType = "system.alert"
+	EventQuotaWarning  EventType = "quota.warning"
+	EventQuotaExceeded EventType = "quota.exceeded"
+
 	// Inbound events
-	EventInboundParsed    EventType = "inbound.parsed"
-	EventInboundSpam      EventType = "inbound.spam"
-	EventInboundRejected  EventType = "inbound.rejected"
+	EventInboundParsed   EventType = "inbound.parsed"
+	EventInboundSpam     EventType = "inbound.spam"
+	EventInboundRejected EventType = "inbound.rejected"
 )
 
 // Webhook represents a webhook configuration
 type Webhook struct {
-	ID             uuid.UUID          `json:"id"`
-	Name           string             `json:"name"`
-	Description    string             `json:"description,omitempty"`
-	
+	ID          uuid.UUID `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description,omitempty"`
+
 	// Target
-	URL            string             `json:"url"`
-	Method         string             `json:"method"` // POST, PUT
-	
+	URL    string `json:"url"`
+	Method string `json:"method"` // POST, PUT
+
 	// Authentication
-	Secret         string             `json:"-"`          // HMAC signing secret
-	AuthType       string             `json:"auth_type"`  // none, basic, bearer, hmac
-	AuthValue      string             `json:"-"`          // Auth credentials
-	
+	Secret    string `json:"-"`         // HMAC signing secret
+	AuthType  string `json:"auth_type"` // none, basic, bearer, hmac
+	AuthValue string `json:"-"`         // Auth credentials
+
 	// Events
-	Events         []EventType        `json:"events"`
-	
+	Events []EventType `json:"events"`
+
 	// Filtering
-	OrganizationID *uuid.UUID         `json:"organization_id,omitempty"`
-	DomainFilter   []string           `json:"domain_filter,omitempty"`
-	
+	OrganizationID *uuid.UUID `json:"organization_id,omitempty"`
+	DomainFilter   []string   `json:"domain_filter,omitempty"`
+
 	// Headers
-	Headers        map[string]string  `json:"headers,omitempty"`
-	
+	Headers map[string]string `json:"headers,omitempty"`
+
 	// Retry settings
-	MaxRetries     int                `json:"max_retries"`
-	RetryDelay     time.Duration      `json:"retry_delay"`
-	Timeout        time.Duration      `json:"timeout"`
-	
+	MaxRetries int           `json:"max_retries"`
+	RetryDelay time.Duration `json:"retry_delay"`
+	Timeout    time.Duration `json:"timeout"`
+
 	// Status
-	Active         bool               `json:"active"`
-	Verified       bool               `json:"verified"`
-	LastSuccess    *time.Time         `json:"last_success,omitempty"`
-	LastFailure    *time.Time         `json:"last_failure,omitempty"`
-	FailureCount   int                `json:"failure_count"`
-	
+	Active       bool       `json:"active"`
+	Verified     bool       `json:"verified"`
+	LastSuccess  *time.Time `json:"last_success,omitempty"`
+	LastFailure  *time.Time `json:"last_failure,omitempty"`
+	FailureCount int        `json:"failure_count"`
+
 	// Metadata
-	CreatedAt      time.Time          `json:"created_at"`
-	UpdatedAt      time.Time          `json:"updated_at"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // WebhookEvent represents an event to be delivered
 type WebhookEvent struct {
-	ID           uuid.UUID              `json:"id"`
-	WebhookID    uuid.UUID              `json:"webhook_id"`
-	EventType    EventType              `json:"event_type"`
-	
+	ID        uuid.UUID `json:"id"`
+	WebhookID uuid.UUID `json:"webhook_id"`
+	EventType EventType `json:"event_type"`
+
 	// Payload
-	Payload      map[string]interface{} `json:"payload"`
-	
+	Payload map[string]interface{} `json:"payload"`
+
 	// Delivery status
-	Status       DeliveryStatus         `json:"status"`
-	Attempts     int                    `json:"attempts"`
-	NextRetry    *time.Time             `json:"next_retry,omitempty"`
-	
+	Status    DeliveryStatus `json:"status"`
+	Attempts  int            `json:"attempts"`
+	NextRetry *time.Time     `json:"next_retry,omitempty"`
+
 	// Response info
-	ResponseCode int                    `json:"response_code,omitempty"`
-	ResponseBody string                 `json:"response_body,omitempty"`
-	Error        string                 `json:"error,omitempty"`
-	
+	ResponseCode int    `json:"response_code,omitempty"`
+	ResponseBody string `json:"response_body,omitempty"`
+	Error        string `json:"error,omitempty"`
+
 	// Timing
-	CreatedAt    time.Time              `json:"created_at"`
-	DeliveredAt  *time.Time             `json:"delivered_at,omitempty"`
-	Duration     int64                  `json:"duration_ms,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	DeliveredAt *time.Time `json:"delivered_at,omitempty"`
+	Duration    int64      `json:"duration_ms,omitempty"`
 }
 
 // DeliveryStatus represents webhook delivery status
@@ -154,49 +152,49 @@ type WebhookPayload struct {
 
 // EmailEventPayload for email-related events
 type EmailEventPayload struct {
-	MessageID    string            `json:"message_id"`
-	From         string            `json:"from"`
-	To           []string          `json:"to"`
-	Subject      string            `json:"subject"`
-	Timestamp    time.Time         `json:"timestamp"`
-	Tags         map[string]string `json:"tags,omitempty"`
-	
+	MessageID string            `json:"message_id"`
+	From      string            `json:"from"`
+	To        []string          `json:"to"`
+	Subject   string            `json:"subject"`
+	Timestamp time.Time         `json:"timestamp"`
+	Tags      map[string]string `json:"tags,omitempty"`
+
 	// Event-specific data
-	Recipient    string            `json:"recipient,omitempty"`
-	BounceType   string            `json:"bounce_type,omitempty"`
-	BounceCode   string            `json:"bounce_code,omitempty"`
-	ErrorMessage string            `json:"error_message,omitempty"`
-	UserAgent    string            `json:"user_agent,omitempty"`
-	IP           string            `json:"ip,omitempty"`
-	LinkURL      string            `json:"link_url,omitempty"`
+	Recipient    string `json:"recipient,omitempty"`
+	BounceType   string `json:"bounce_type,omitempty"`
+	BounceCode   string `json:"bounce_code,omitempty"`
+	ErrorMessage string `json:"error_message,omitempty"`
+	UserAgent    string `json:"user_agent,omitempty"`
+	IP           string `json:"ip,omitempty"`
+	LinkURL      string `json:"link_url,omitempty"`
 }
 
 // BounceEventPayload for bounce events
 type BounceEventPayload struct {
-	MessageID    string    `json:"message_id"`
-	Recipient    string    `json:"recipient"`
-	BounceType   string    `json:"bounce_type"`   // hard, soft, block
-	BounceClass  string    `json:"bounce_class"`  // invalid, full, timeout, etc.
-	DiagCode     string    `json:"diagnostic_code"`
-	RemoteMTA    string    `json:"remote_mta,omitempty"`
-	Timestamp    time.Time `json:"timestamp"`
+	MessageID   string    `json:"message_id"`
+	Recipient   string    `json:"recipient"`
+	BounceType  string    `json:"bounce_type"`  // hard, soft, block
+	BounceClass string    `json:"bounce_class"` // invalid, full, timeout, etc.
+	DiagCode    string    `json:"diagnostic_code"`
+	RemoteMTA   string    `json:"remote_mta,omitempty"`
+	Timestamp   time.Time `json:"timestamp"`
 }
 
 // InboundEventPayload for received emails
 type InboundEventPayload struct {
-	MessageID    string            `json:"message_id"`
-	From         string            `json:"from"`
-	To           []string          `json:"to"`
-	Cc           []string          `json:"cc,omitempty"`
-	Subject      string            `json:"subject"`
-	Date         time.Time         `json:"date"`
-	TextBody     string            `json:"text_body,omitempty"`
-	HTMLBody     string            `json:"html_body,omitempty"`
-	Attachments  []AttachmentInfo  `json:"attachments,omitempty"`
-	Headers      map[string]string `json:"headers"`
-	SPFResult    string            `json:"spf_result,omitempty"`
-	DKIMResult   string            `json:"dkim_result,omitempty"`
-	SpamScore    float64           `json:"spam_score,omitempty"`
+	MessageID   string            `json:"message_id"`
+	From        string            `json:"from"`
+	To          []string          `json:"to"`
+	Cc          []string          `json:"cc,omitempty"`
+	Subject     string            `json:"subject"`
+	Date        time.Time         `json:"date"`
+	TextBody    string            `json:"text_body,omitempty"`
+	HTMLBody    string            `json:"html_body,omitempty"`
+	Attachments []AttachmentInfo  `json:"attachments,omitempty"`
+	Headers     map[string]string `json:"headers"`
+	SPFResult   string            `json:"spf_result,omitempty"`
+	DKIMResult  string            `json:"dkim_result,omitempty"`
+	SpamScore   float64           `json:"spam_score,omitempty"`
 }
 
 // AttachmentInfo describes an email attachment
@@ -209,36 +207,31 @@ type AttachmentInfo struct {
 
 // AnalyticsEventPayload for analytics events
 type AnalyticsEventPayload struct {
-	Period      string    `json:"period"`      // daily, weekly, monthly
-	StartDate   time.Time `json:"start_date"`
-	EndDate     time.Time `json:"end_date"`
-	
-	Sent        int64     `json:"sent"`
-	Delivered   int64     `json:"delivered"`
-	Bounced     int64     `json:"bounced"`
-	Opened      int64     `json:"opened"`
-	Clicked     int64     `json:"clicked"`
-	Complaints  int64     `json:"complaints"`
-	Unsubscribes int64    `json:"unsubscribes"`
-	
-	DeliveryRate float64  `json:"delivery_rate"`
-	OpenRate     float64  `json:"open_rate"`
-	ClickRate    float64  `json:"click_rate"`
-	BounceRate   float64  `json:"bounce_rate"`
+	Period    string    `json:"period"` // daily, weekly, monthly
+	StartDate time.Time `json:"start_date"`
+	EndDate   time.Time `json:"end_date"`
+
+	Sent       int64 `json:"sent"`
+	Delivered  int64 `json:"delivered"`
+	Bounced    int64 `json:"bounced"`
+	Complaints int64 `json:"complaints"`
+
+	DeliveryRate float64 `json:"delivery_rate"`
+	BounceRate   float64 `json:"bounce_rate"`
 }
 
 // WebhookService manages webhooks
 type WebhookService struct {
 	repo       WebhookRepository
 	httpClient *http.Client
-	
+
 	// Worker pool
 	workerCount int
 	eventQueue  chan *WebhookEvent
 	stopCh      chan struct{}
 	wg          sync.WaitGroup
-	
-	logger     Logger
+
+	logger Logger
 }
 
 // WebhookRepository defines storage operations
@@ -250,7 +243,7 @@ type WebhookRepository interface {
 	ListWebhooksByEvent(ctx context.Context, event EventType) ([]*Webhook, error)
 	UpdateWebhook(ctx context.Context, webhook *Webhook) error
 	DeleteWebhook(ctx context.Context, id uuid.UUID) error
-	
+
 	// Event operations
 	CreateEvent(ctx context.Context, event *WebhookEvent) error
 	GetEvent(ctx context.Context, id uuid.UUID) (*WebhookEvent, error)
@@ -258,7 +251,7 @@ type WebhookRepository interface {
 	UpdateEvent(ctx context.Context, event *WebhookEvent) error
 	GetPendingEvents(ctx context.Context, limit int) ([]*WebhookEvent, error)
 	GetRetryableEvents(ctx context.Context, limit int) ([]*WebhookEvent, error)
-	
+
 	// Statistics
 	GetDeliveryStats(ctx context.Context, webhookID uuid.UUID, days int) (*DeliveryStats, error)
 }
@@ -282,13 +275,17 @@ type Logger interface {
 // NewWebhookService creates a new webhook service
 func NewWebhookService(repo WebhookRepository, logger Logger) *WebhookService {
 	return &WebhookService{
-		repo:        repo,
+		repo: repo,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
 				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 10,
 				IdleConnTimeout:     90 * time.Second,
+				// SSRF guard: refuse to connect to internal IPs even if a
+				// crafted DNS record points there. This is the authoritative
+				// defense — the upfront URL validator only complements it.
+				DialContext: safeDialContext(),
 			},
 		},
 		workerCount: 10,
@@ -304,11 +301,11 @@ func (s *WebhookService) Start() {
 		s.wg.Add(1)
 		go s.worker()
 	}
-	
+
 	// Start retry processor
 	s.wg.Add(1)
 	go s.retryProcessor()
-	
+
 	s.logger.Info("webhook service started", "workers", s.workerCount)
 }
 
@@ -322,7 +319,7 @@ func (s *WebhookService) Stop() {
 // worker processes webhook events
 func (s *WebhookService) worker() {
 	defer s.wg.Done()
-	
+
 	for {
 		select {
 		case <-s.stopCh:
@@ -336,10 +333,10 @@ func (s *WebhookService) worker() {
 // retryProcessor periodically checks for events to retry
 func (s *WebhookService) retryProcessor() {
 	defer s.wg.Done()
-	
+
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-s.stopCh:
@@ -357,7 +354,7 @@ func (s *WebhookService) processRetries() {
 		s.logger.Error("failed to get retryable events", "error", err)
 		return
 	}
-	
+
 	for _, event := range events {
 		select {
 		case s.eventQueue <- event:
@@ -369,10 +366,13 @@ func (s *WebhookService) processRetries() {
 
 // CreateWebhook creates a new webhook
 func (s *WebhookService) CreateWebhook(ctx context.Context, webhook *Webhook) error {
+	if err := ValidateWebhookURL(webhook.URL); err != nil {
+		return err
+	}
 	webhook.ID = uuid.New()
 	webhook.CreatedAt = time.Now()
 	webhook.UpdatedAt = time.Now()
-	
+
 	// Set defaults
 	if webhook.Method == "" {
 		webhook.Method = "POST"
@@ -386,13 +386,54 @@ func (s *WebhookService) CreateWebhook(ctx context.Context, webhook *Webhook) er
 	if webhook.Timeout == 0 {
 		webhook.Timeout = 30 * time.Second
 	}
-	
+
 	// Generate signing secret if HMAC auth
 	if webhook.AuthType == "hmac" && webhook.Secret == "" {
 		webhook.Secret = generateSecret(32)
 	}
-	
+
 	return s.repo.CreateWebhook(ctx, webhook)
+}
+
+// DeliverOnce delivers a single event to a specific URL, bypassing the
+// subscription store. Used for per-domain WebhookURL settings that aren't
+// stored as Webhook subscriptions but should still benefit from the safe
+// HTTP transport (SSRF guard, timeouts) and basic event auditing.
+func (s *WebhookService) DeliverOnce(ctx context.Context, url string, eventType EventType, data map[string]interface{}) error {
+	if url == "" {
+		return nil
+	}
+	if err := ValidateWebhookURL(url); err != nil {
+		s.logger.Error("rejecting unsafe webhook url", "url", url, "error", err)
+		return err
+	}
+	payload := WebhookPayload{
+		ID:        uuid.New().String(),
+		Event:     eventType,
+		Timestamp: time.Now(),
+		Data:      data,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "Lightr-Webhook/1.0")
+	req.Header.Set("X-Event-Type", string(eventType))
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		s.logger.Error("webhook one-shot delivery failed", "url", url, "error", err)
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		s.logger.Error("webhook one-shot non-2xx", "url", url, "status", resp.StatusCode)
+	}
+	return nil
 }
 
 // Trigger triggers a webhook event
@@ -402,12 +443,12 @@ func (s *WebhookService) Trigger(ctx context.Context, eventType EventType, data 
 	if err != nil {
 		return err
 	}
-	
+
 	for _, webhook := range webhooks {
 		if !webhook.Active {
 			continue
 		}
-		
+
 		// Create event
 		event := &WebhookEvent{
 			ID:        uuid.New(),
@@ -417,12 +458,12 @@ func (s *WebhookService) Trigger(ctx context.Context, eventType EventType, data 
 			Status:    StatusPending,
 			CreatedAt: time.Now(),
 		}
-		
+
 		if err := s.repo.CreateEvent(ctx, event); err != nil {
 			s.logger.Error("failed to create webhook event", "error", err)
 			continue
 		}
-		
+
 		// Queue for delivery
 		select {
 		case s.eventQueue <- event:
@@ -430,7 +471,7 @@ func (s *WebhookService) Trigger(ctx context.Context, eventType EventType, data 
 			s.logger.Error("webhook queue full", "event_id", event.ID)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -443,7 +484,7 @@ func (s *WebhookService) TriggerEmailEvent(ctx context.Context, eventType EventT
 		"subject":    payload.Subject,
 		"timestamp":  payload.Timestamp,
 	}
-	
+
 	if payload.Recipient != "" {
 		data["recipient"] = payload.Recipient
 	}
@@ -465,7 +506,7 @@ func (s *WebhookService) TriggerEmailEvent(ctx context.Context, eventType EventT
 	if len(payload.Tags) > 0 {
 		data["tags"] = payload.Tags
 	}
-	
+
 	return s.Trigger(ctx, eventType, data)
 }
 
@@ -480,7 +521,7 @@ func (s *WebhookService) TriggerBounceEvent(ctx context.Context, payload *Bounce
 	case "block":
 		eventType = EventBounceBlock
 	}
-	
+
 	data := map[string]interface{}{
 		"message_id":      payload.MessageID,
 		"recipient":       payload.Recipient,
@@ -492,7 +533,7 @@ func (s *WebhookService) TriggerBounceEvent(ctx context.Context, payload *Bounce
 	if payload.RemoteMTA != "" {
 		data["remote_mta"] = payload.RemoteMTA
 	}
-	
+
 	return s.Trigger(ctx, eventType, data)
 }
 
@@ -506,7 +547,7 @@ func (s *WebhookService) TriggerInboundEvent(ctx context.Context, payload *Inbou
 		"date":       payload.Date,
 		"headers":    payload.Headers,
 	}
-	
+
 	if len(payload.Cc) > 0 {
 		data["cc"] = payload.Cc
 	}
@@ -528,7 +569,7 @@ func (s *WebhookService) TriggerInboundEvent(ctx context.Context, payload *Inbou
 	if payload.SpamScore > 0 {
 		data["spam_score"] = payload.SpamScore
 	}
-	
+
 	return s.Trigger(ctx, EventInboundParsed, data)
 }
 
@@ -545,31 +586,26 @@ func (s *WebhookService) TriggerAnalyticsEvent(ctx context.Context, payload *Ana
 	default:
 		eventType = EventAnalyticsDaily
 	}
-	
+
 	data := map[string]interface{}{
-		"period":       payload.Period,
-		"start_date":   payload.StartDate,
-		"end_date":     payload.EndDate,
-		"sent":         payload.Sent,
-		"delivered":    payload.Delivered,
-		"bounced":      payload.Bounced,
-		"opened":       payload.Opened,
-		"clicked":      payload.Clicked,
-		"complaints":   payload.Complaints,
-		"unsubscribes": payload.Unsubscribes,
+		"period":        payload.Period,
+		"start_date":    payload.StartDate,
+		"end_date":      payload.EndDate,
+		"sent":          payload.Sent,
+		"delivered":     payload.Delivered,
+		"bounced":       payload.Bounced,
+		"complaints":    payload.Complaints,
 		"delivery_rate": payload.DeliveryRate,
-		"open_rate":    payload.OpenRate,
-		"click_rate":   payload.ClickRate,
-		"bounce_rate":  payload.BounceRate,
+		"bounce_rate":   payload.BounceRate,
 	}
-	
+
 	return s.Trigger(ctx, eventType, data)
 }
 
 // deliverEvent delivers a webhook event
 func (s *WebhookService) deliverEvent(event *WebhookEvent) {
 	ctx := context.Background()
-	
+
 	webhook, err := s.repo.GetWebhook(ctx, event.WebhookID)
 	if err != nil {
 		event.Status = StatusFailed
@@ -577,7 +613,7 @@ func (s *WebhookService) deliverEvent(event *WebhookEvent) {
 		s.repo.UpdateEvent(ctx, event)
 		return
 	}
-	
+
 	// Build payload
 	payload := WebhookPayload{
 		ID:        event.ID.String(),
@@ -585,7 +621,7 @@ func (s *WebhookService) deliverEvent(event *WebhookEvent) {
 		Timestamp: event.CreatedAt,
 		Data:      event.Payload,
 	}
-	
+
 	body, err := json.Marshal(payload)
 	if err != nil {
 		event.Status = StatusFailed
@@ -593,7 +629,7 @@ func (s *WebhookService) deliverEvent(event *WebhookEvent) {
 		s.repo.UpdateEvent(ctx, event)
 		return
 	}
-	
+
 	// Create request
 	req, err := http.NewRequest(webhook.Method, webhook.URL, bytes.NewReader(body))
 	if err != nil {
@@ -602,57 +638,57 @@ func (s *WebhookService) deliverEvent(event *WebhookEvent) {
 		s.repo.UpdateEvent(ctx, event)
 		return
 	}
-	
+
 	// Set headers
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "Lightr-Webhook/1.0")
 	req.Header.Set("X-Webhook-ID", webhook.ID.String())
 	req.Header.Set("X-Event-ID", event.ID.String())
 	req.Header.Set("X-Event-Type", string(event.EventType))
-	
+
 	// Add custom headers
 	for k, v := range webhook.Headers {
 		req.Header.Set(k, v)
 	}
-	
+
 	// Add authentication
 	s.addAuth(req, webhook, body)
-	
+
 	// Send request
 	start := time.Now()
 	resp, err := s.httpClient.Do(req)
 	duration := time.Since(start)
-	
+
 	event.Duration = duration.Milliseconds()
 	event.Attempts++
-	
+
 	if err != nil {
 		s.handleDeliveryFailure(ctx, event, webhook, err.Error())
 		return
 	}
 	defer resp.Body.Close()
-	
+
 	// Read response
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 	event.ResponseCode = resp.StatusCode
 	event.ResponseBody = string(respBody)
-	
+
 	// Check status
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		event.Status = StatusDelivered
 		now := time.Now()
 		event.DeliveredAt = &now
-		
+
 		// Update webhook success
 		webhook.LastSuccess = &now
 		webhook.FailureCount = 0
 		s.repo.UpdateWebhook(ctx, webhook)
-		
+
 		s.logger.Debug("webhook delivered", "event_id", event.ID, "webhook_id", webhook.ID)
 	} else {
 		s.handleDeliveryFailure(ctx, event, webhook, fmt.Sprintf("HTTP %d", resp.StatusCode))
 	}
-	
+
 	s.repo.UpdateEvent(ctx, event)
 }
 
@@ -660,19 +696,19 @@ func (s *WebhookService) addAuth(req *http.Request, webhook *Webhook, body []byt
 	switch webhook.AuthType {
 	case "basic":
 		req.SetBasicAuth(webhook.AuthValue, webhook.Secret)
-		
+
 	case "bearer":
 		req.Header.Set("Authorization", "Bearer "+webhook.AuthValue)
-		
+
 	case "hmac":
 		// Sign with HMAC-SHA256
 		timestamp := fmt.Sprintf("%d", time.Now().Unix())
 		signaturePayload := timestamp + "." + string(body)
-		
+
 		mac := hmac.New(sha256.New, []byte(webhook.Secret))
 		mac.Write([]byte(signaturePayload))
 		signature := hex.EncodeToString(mac.Sum(nil))
-		
+
 		req.Header.Set("X-Webhook-Timestamp", timestamp)
 		req.Header.Set("X-Webhook-Signature", "sha256="+signature)
 	}
@@ -680,10 +716,10 @@ func (s *WebhookService) addAuth(req *http.Request, webhook *Webhook, body []byt
 
 func (s *WebhookService) handleDeliveryFailure(ctx context.Context, event *WebhookEvent, webhook *Webhook, errMsg string) {
 	event.Error = errMsg
-	
+
 	if event.Attempts >= webhook.MaxRetries {
 		event.Status = StatusFailed
-		s.logger.Error("webhook delivery failed after retries", 
+		s.logger.Error("webhook delivery failed after retries",
 			"event_id", event.ID, "webhook_id", webhook.ID, "error", errMsg)
 	} else {
 		event.Status = StatusRetrying
@@ -692,7 +728,7 @@ func (s *WebhookService) handleDeliveryFailure(ctx context.Context, event *Webho
 		s.logger.Debug("webhook delivery retry scheduled",
 			"event_id", event.ID, "attempt", event.Attempts, "next_retry", nextRetry)
 	}
-	
+
 	// Update webhook failure stats
 	now := time.Now()
 	webhook.LastFailure = &now
@@ -707,29 +743,29 @@ func (s *WebhookService) VerifyWebhook(ctx context.Context, webhookID uuid.UUID)
 	if err != nil {
 		return err
 	}
-	
+
 	// Create test event
 	event := &WebhookEvent{
 		ID:        uuid.New(),
 		WebhookID: webhook.ID,
 		EventType: "webhook.test",
 		Payload: map[string]interface{}{
-			"message": "This is a test webhook from Lightr",
+			"message":    "This is a test webhook from Lightr",
 			"webhook_id": webhook.ID.String(),
 		},
 		Status:    StatusPending,
 		CreatedAt: time.Now(),
 	}
-	
+
 	// Deliver synchronously
 	s.deliverEvent(event)
-	
+
 	if event.Status == StatusDelivered {
 		webhook.Verified = true
 		webhook.UpdatedAt = time.Now()
 		return s.repo.UpdateWebhook(ctx, webhook)
 	}
-	
+
 	return fmt.Errorf("verification failed: %s", event.Error)
 }
 
@@ -745,6 +781,9 @@ func (s *WebhookService) ListWebhooks(ctx context.Context, orgID *uuid.UUID) ([]
 
 // UpdateWebhook updates a webhook
 func (s *WebhookService) UpdateWebhook(ctx context.Context, webhook *Webhook) error {
+	if err := ValidateWebhookURL(webhook.URL); err != nil {
+		return err
+	}
 	webhook.UpdatedAt = time.Now()
 	return s.repo.UpdateWebhook(ctx, webhook)
 }
@@ -808,12 +847,12 @@ func (h *WebhookHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	
+
 	if err := h.service.CreateWebhook(r.Context(), &webhook); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	
+
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(webhook)
 }
@@ -824,13 +863,13 @@ func (h *WebhookHandler) handleGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	
+
 	webhook, err := h.service.GetWebhook(r.Context(), id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	
+
 	json.NewEncoder(w).Encode(webhook)
 }
 
@@ -840,23 +879,23 @@ func (h *WebhookHandler) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	
+
 	webhook, err := h.service.GetWebhook(r.Context(), id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	
+
 	if err := json.NewDecoder(r.Body).Decode(webhook); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	
+
 	if err := h.service.UpdateWebhook(r.Context(), webhook); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	
+
 	json.NewEncoder(w).Encode(webhook)
 }
 
@@ -866,12 +905,12 @@ func (h *WebhookHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	
+
 	if err := h.service.DeleteWebhook(r.Context(), id); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -881,12 +920,12 @@ func (h *WebhookHandler) handleVerify(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	
+
 	if err := h.service.VerifyWebhook(r.Context(), id); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	
+
 	json.NewEncoder(w).Encode(map[string]string{"status": "verified"})
 }
 
@@ -896,13 +935,13 @@ func (h *WebhookHandler) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	
+
 	events, err := h.service.GetEvents(r.Context(), id, 100)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	
+
 	json.NewEncoder(w).Encode(events)
 }
 
@@ -912,33 +951,76 @@ func (h *WebhookHandler) handleStats(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	
+
 	stats, err := h.service.GetDeliveryStats(r.Context(), id, 30)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	
+
 	json.NewEncoder(w).Encode(stats)
 }
 
 // SQLite Repository Implementation
 
 type SQLiteWebhookRepository struct {
-	db *sql.DB
+	db     *sql.DB
+	driver string
 }
 
 func NewSQLiteWebhookRepository(db *sql.DB) (*SQLiteWebhookRepository, error) {
-	repo := &SQLiteWebhookRepository{db: db}
+	return NewSQLWebhookRepository(db, "sqlite")
+}
+
+func NewPostgresWebhookRepository(db *sql.DB) (*SQLiteWebhookRepository, error) {
+	return NewSQLWebhookRepository(db, "postgres")
+}
+
+func NewSQLWebhookRepository(db *sql.DB, driver string) (*SQLiteWebhookRepository, error) {
+	repo := &SQLiteWebhookRepository{db: db, driver: driver}
 	if err := repo.migrate(); err != nil {
 		return nil, err
 	}
 	return repo, nil
 }
 
+func (r *SQLiteWebhookRepository) bind(query string) string {
+	if r.driver != "postgres" {
+		return query
+	}
+
+	var out strings.Builder
+	index := 1
+	for _, ch := range query {
+		if ch == '?' {
+			out.WriteString(fmt.Sprintf("$%d", index))
+			index++
+			continue
+		}
+		out.WriteRune(ch)
+	}
+	return out.String()
+}
+
+func (r *SQLiteWebhookRepository) execContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
+	return r.db.ExecContext(ctx, r.bind(query), args...)
+}
+
+func (r *SQLiteWebhookRepository) queryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
+	return r.db.QueryContext(ctx, r.bind(query), args...)
+}
+
+func (r *SQLiteWebhookRepository) queryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
+	return r.db.QueryRowContext(ctx, r.bind(query), args...)
+}
+
 func (r *SQLiteWebhookRepository) migrate() error {
+	timeType := "DATETIME"
+	if r.driver == "postgres" {
+		timeType = "TIMESTAMP"
+	}
 	queries := []string{
-		`CREATE TABLE IF NOT EXISTS webhooks (
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS webhooks (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
 			description TEXT,
@@ -956,39 +1038,39 @@ func (r *SQLiteWebhookRepository) migrate() error {
 			timeout INTEGER DEFAULT 30,
 			active INTEGER DEFAULT 1,
 			verified INTEGER DEFAULT 0,
-			last_success DATETIME,
-			last_failure DATETIME,
+			last_success %s,
+			last_failure %s,
 			failure_count INTEGER DEFAULT 0,
-			created_at DATETIME NOT NULL,
-			updated_at DATETIME NOT NULL
-		)`,
-		
-		`CREATE TABLE IF NOT EXISTS webhook_events (
+			created_at %s NOT NULL,
+			updated_at %s NOT NULL
+		)`, timeType, timeType, timeType, timeType),
+
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS webhook_events (
 			id TEXT PRIMARY KEY,
 			webhook_id TEXT NOT NULL,
 			event_type TEXT NOT NULL,
 			payload TEXT NOT NULL,
 			status TEXT NOT NULL,
 			attempts INTEGER DEFAULT 0,
-			next_retry DATETIME,
+			next_retry %s,
 			response_code INTEGER,
 			response_body TEXT,
 			error TEXT,
-			created_at DATETIME NOT NULL,
-			delivered_at DATETIME,
+			created_at %s NOT NULL,
+			delivered_at %s,
 			duration_ms INTEGER,
 			FOREIGN KEY (webhook_id) REFERENCES webhooks(id) ON DELETE CASCADE
-		)`,
-		
+		)`, timeType, timeType, timeType),
+
 		`CREATE INDEX IF NOT EXISTS idx_webhooks_org ON webhooks(organization_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_webhooks_active ON webhooks(active)`,
 		`CREATE INDEX IF NOT EXISTS idx_webhook_events_webhook ON webhook_events(webhook_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_webhook_events_status ON webhook_events(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_webhook_events_retry ON webhook_events(next_retry)`,
 	}
-	
+
 	for _, q := range queries {
-		if _, err := r.db.Exec(q); err != nil {
+		if _, err := r.db.Exec(r.bind(q)); err != nil {
 			return err
 		}
 	}
@@ -999,14 +1081,14 @@ func (r *SQLiteWebhookRepository) CreateWebhook(ctx context.Context, webhook *We
 	eventsJSON, _ := json.Marshal(webhook.Events)
 	domainsJSON, _ := json.Marshal(webhook.DomainFilter)
 	headersJSON, _ := json.Marshal(webhook.Headers)
-	
+
 	var orgID *string
 	if webhook.OrganizationID != nil {
 		s := webhook.OrganizationID.String()
 		orgID = &s
 	}
-	
-	_, err := r.db.ExecContext(ctx, `
+
+	_, err := r.execContext(ctx, `
 		INSERT INTO webhooks (id, name, description, url, method, secret, auth_type, auth_value,
 			events, organization_id, domain_filter, headers, max_retries, retry_delay, timeout,
 			active, verified, created_at, updated_at)
@@ -1016,7 +1098,7 @@ func (r *SQLiteWebhookRepository) CreateWebhook(ctx context.Context, webhook *We
 		orgID, string(domainsJSON), string(headersJSON), webhook.MaxRetries,
 		int(webhook.RetryDelay.Seconds()), int(webhook.Timeout.Seconds()),
 		webhook.Active, webhook.Verified, webhook.CreatedAt, webhook.UpdatedAt)
-	
+
 	return err
 }
 
@@ -1026,8 +1108,8 @@ func (r *SQLiteWebhookRepository) GetWebhook(ctx context.Context, id uuid.UUID) 
 	var orgID *string
 	var eventsJSON, domainsJSON, headersJSON string
 	var retryDelay, timeout int
-	
-	err := r.db.QueryRowContext(ctx, `
+
+	err := r.queryRowContext(ctx, `
 		SELECT id, name, description, url, method, secret, auth_type, auth_value, events,
 			organization_id, domain_filter, headers, max_retries, retry_delay, timeout,
 			active, verified, last_success, last_failure, failure_count, created_at, updated_at
@@ -1040,35 +1122,35 @@ func (r *SQLiteWebhookRepository) GetWebhook(ctx context.Context, id uuid.UUID) 
 	if err != nil {
 		return nil, err
 	}
-	
+
 	webhook.ID, _ = uuid.Parse(idStr)
 	webhook.RetryDelay = time.Duration(retryDelay) * time.Second
 	webhook.Timeout = time.Duration(timeout) * time.Second
-	
+
 	if orgID != nil {
 		id, _ := uuid.Parse(*orgID)
 		webhook.OrganizationID = &id
 	}
-	
+
 	json.Unmarshal([]byte(eventsJSON), &webhook.Events)
 	json.Unmarshal([]byte(domainsJSON), &webhook.DomainFilter)
 	json.Unmarshal([]byte(headersJSON), &webhook.Headers)
-	
+
 	return &webhook, nil
 }
 
 func (r *SQLiteWebhookRepository) ListWebhooks(ctx context.Context, orgID *uuid.UUID) ([]*Webhook, error) {
 	var rows *sql.Rows
 	var err error
-	
+
 	if orgID != nil {
-		rows, err = r.db.QueryContext(ctx, `
+		rows, err = r.queryContext(ctx, `
 			SELECT id, name, description, url, method, auth_type, events, organization_id,
 				max_retries, active, verified, last_success, last_failure, failure_count,
 				created_at, updated_at
 			FROM webhooks WHERE organization_id = ? ORDER BY created_at DESC`, orgID.String())
 	} else {
-		rows, err = r.db.QueryContext(ctx, `
+		rows, err = r.queryContext(ctx, `
 			SELECT id, name, description, url, method, auth_type, events, organization_id,
 				max_retries, active, verified, last_success, last_failure, failure_count,
 				created_at, updated_at
@@ -1078,14 +1160,14 @@ func (r *SQLiteWebhookRepository) ListWebhooks(ctx context.Context, orgID *uuid.
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	var webhooks []*Webhook
 	for rows.Next() {
 		var webhook Webhook
 		var idStr string
 		var org *string
 		var eventsJSON string
-		
+
 		err := rows.Scan(&idStr, &webhook.Name, &webhook.Description, &webhook.URL, &webhook.Method,
 			&webhook.AuthType, &eventsJSON, &org, &webhook.MaxRetries, &webhook.Active,
 			&webhook.Verified, &webhook.LastSuccess, &webhook.LastFailure, &webhook.FailureCount,
@@ -1093,19 +1175,19 @@ func (r *SQLiteWebhookRepository) ListWebhooks(ctx context.Context, orgID *uuid.
 		if err != nil {
 			return nil, err
 		}
-		
+
 		webhook.ID, _ = uuid.Parse(idStr)
 		json.Unmarshal([]byte(eventsJSON), &webhook.Events)
-		
+
 		webhooks = append(webhooks, &webhook)
 	}
-	
+
 	return webhooks, rows.Err()
 }
 
 func (r *SQLiteWebhookRepository) ListWebhooksByEvent(ctx context.Context, event EventType) ([]*Webhook, error) {
 	// SQLite JSON contains check
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.queryContext(ctx, `
 		SELECT id, name, description, url, method, secret, auth_type, auth_value, events,
 			organization_id, domain_filter, headers, max_retries, retry_delay, timeout,
 			active, verified, last_success, last_failure, failure_count, created_at, updated_at
@@ -1114,7 +1196,7 @@ func (r *SQLiteWebhookRepository) ListWebhooksByEvent(ctx context.Context, event
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	var webhooks []*Webhook
 	for rows.Next() {
 		var webhook Webhook
@@ -1122,7 +1204,7 @@ func (r *SQLiteWebhookRepository) ListWebhooksByEvent(ctx context.Context, event
 		var orgID *string
 		var eventsJSON, domainsJSON, headersJSON string
 		var retryDelay, timeout int
-		
+
 		err := rows.Scan(&idStr, &webhook.Name, &webhook.Description, &webhook.URL, &webhook.Method,
 			&webhook.Secret, &webhook.AuthType, &webhook.AuthValue, &eventsJSON,
 			&orgID, &domainsJSON, &headersJSON, &webhook.MaxRetries, &retryDelay, &timeout,
@@ -1131,18 +1213,18 @@ func (r *SQLiteWebhookRepository) ListWebhooksByEvent(ctx context.Context, event
 		if err != nil {
 			return nil, err
 		}
-		
+
 		webhook.ID, _ = uuid.Parse(idStr)
 		webhook.RetryDelay = time.Duration(retryDelay) * time.Second
 		webhook.Timeout = time.Duration(timeout) * time.Second
-		
+
 		json.Unmarshal([]byte(eventsJSON), &webhook.Events)
 		json.Unmarshal([]byte(domainsJSON), &webhook.DomainFilter)
 		json.Unmarshal([]byte(headersJSON), &webhook.Headers)
-		
+
 		webhooks = append(webhooks, &webhook)
 	}
-	
+
 	return webhooks, rows.Err()
 }
 
@@ -1150,8 +1232,8 @@ func (r *SQLiteWebhookRepository) UpdateWebhook(ctx context.Context, webhook *We
 	eventsJSON, _ := json.Marshal(webhook.Events)
 	domainsJSON, _ := json.Marshal(webhook.DomainFilter)
 	headersJSON, _ := json.Marshal(webhook.Headers)
-	
-	_, err := r.db.ExecContext(ctx, `
+
+	_, err := r.execContext(ctx, `
 		UPDATE webhooks SET
 			name = ?, description = ?, url = ?, method = ?, secret = ?, auth_type = ?,
 			auth_value = ?, events = ?, domain_filter = ?, headers = ?, max_retries = ?,
@@ -1163,26 +1245,26 @@ func (r *SQLiteWebhookRepository) UpdateWebhook(ctx context.Context, webhook *We
 		string(headersJSON), webhook.MaxRetries, int(webhook.RetryDelay.Seconds()),
 		int(webhook.Timeout.Seconds()), webhook.Active, webhook.Verified, webhook.LastSuccess,
 		webhook.LastFailure, webhook.FailureCount, webhook.UpdatedAt, webhook.ID.String())
-	
+
 	return err
 }
 
 func (r *SQLiteWebhookRepository) DeleteWebhook(ctx context.Context, id uuid.UUID) error {
-	_, err := r.db.ExecContext(ctx, "DELETE FROM webhooks WHERE id = ?", id.String())
+	_, err := r.execContext(ctx, "DELETE FROM webhooks WHERE id = ?", id.String())
 	return err
 }
 
 func (r *SQLiteWebhookRepository) CreateEvent(ctx context.Context, event *WebhookEvent) error {
 	payloadJSON, _ := json.Marshal(event.Payload)
-	
-	_, err := r.db.ExecContext(ctx, `
+
+	_, err := r.execContext(ctx, `
 		INSERT INTO webhook_events (id, webhook_id, event_type, payload, status, attempts,
 			next_retry, response_code, response_body, error, created_at, delivered_at, duration_ms)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.ID.String(), event.WebhookID.String(), string(event.EventType), string(payloadJSON),
 		string(event.Status), event.Attempts, event.NextRetry, event.ResponseCode,
 		event.ResponseBody, event.Error, event.CreatedAt, event.DeliveredAt, event.Duration)
-	
+
 	return err
 }
 
@@ -1190,8 +1272,8 @@ func (r *SQLiteWebhookRepository) GetEvent(ctx context.Context, id uuid.UUID) (*
 	var event WebhookEvent
 	var idStr, webhookStr, eventType, status string
 	var payloadJSON string
-	
-	err := r.db.QueryRowContext(ctx, `
+
+	err := r.queryRowContext(ctx, `
 		SELECT id, webhook_id, event_type, payload, status, attempts, next_retry,
 			response_code, response_body, error, created_at, delivered_at, duration_ms
 		FROM webhook_events WHERE id = ?`, id.String()).Scan(
@@ -1201,18 +1283,18 @@ func (r *SQLiteWebhookRepository) GetEvent(ctx context.Context, id uuid.UUID) (*
 	if err != nil {
 		return nil, err
 	}
-	
+
 	event.ID, _ = uuid.Parse(idStr)
 	event.WebhookID, _ = uuid.Parse(webhookStr)
 	event.EventType = EventType(eventType)
 	event.Status = DeliveryStatus(status)
 	json.Unmarshal([]byte(payloadJSON), &event.Payload)
-	
+
 	return &event, nil
 }
 
 func (r *SQLiteWebhookRepository) ListEvents(ctx context.Context, webhookID uuid.UUID, limit int) ([]*WebhookEvent, error) {
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.queryContext(ctx, `
 		SELECT id, webhook_id, event_type, payload, status, attempts, next_retry,
 			response_code, response_body, error, created_at, delivered_at, duration_ms
 		FROM webhook_events WHERE webhook_id = ?
@@ -1221,93 +1303,111 @@ func (r *SQLiteWebhookRepository) ListEvents(ctx context.Context, webhookID uuid
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	var events []*WebhookEvent
 	for rows.Next() {
 		var event WebhookEvent
 		var idStr, webhookStr, eventType, status string
 		var payloadJSON string
-		
+
 		err := rows.Scan(&idStr, &webhookStr, &eventType, &payloadJSON, &status, &event.Attempts,
 			&event.NextRetry, &event.ResponseCode, &event.ResponseBody, &event.Error,
 			&event.CreatedAt, &event.DeliveredAt, &event.Duration)
 		if err != nil {
 			return nil, err
 		}
-		
+
 		event.ID, _ = uuid.Parse(idStr)
 		event.WebhookID, _ = uuid.Parse(webhookStr)
 		event.EventType = EventType(eventType)
 		event.Status = DeliveryStatus(status)
 		json.Unmarshal([]byte(payloadJSON), &event.Payload)
-		
+
 		events = append(events, &event)
 	}
-	
+
 	return events, rows.Err()
 }
 
 func (r *SQLiteWebhookRepository) UpdateEvent(ctx context.Context, event *WebhookEvent) error {
-	_, err := r.db.ExecContext(ctx, `
+	_, err := r.execContext(ctx, `
 		UPDATE webhook_events SET
 			status = ?, attempts = ?, next_retry = ?, response_code = ?,
 			response_body = ?, error = ?, delivered_at = ?, duration_ms = ?
 		WHERE id = ?`,
 		string(event.Status), event.Attempts, event.NextRetry, event.ResponseCode,
 		event.ResponseBody, event.Error, event.DeliveredAt, event.Duration, event.ID.String())
-	
+
 	return err
 }
 
 func (r *SQLiteWebhookRepository) GetPendingEvents(ctx context.Context, limit int) ([]*WebhookEvent, error) {
-	return r.queryEvents(ctx, "status = 'pending'", limit)
+	return r.queryEvents(ctx, "status = ?", limit, string(StatusPending))
 }
 
 func (r *SQLiteWebhookRepository) GetRetryableEvents(ctx context.Context, limit int) ([]*WebhookEvent, error) {
-	return r.queryEvents(ctx, "status = 'retrying' AND next_retry <= datetime('now')", limit)
+	events, err := r.queryEvents(ctx, "status = ?", limit, string(StatusRetrying))
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now().UTC()
+	filtered := make([]*WebhookEvent, 0, len(events))
+	for _, event := range events {
+		if event.NextRetry != nil && !event.NextRetry.After(now) {
+			filtered = append(filtered, event)
+		}
+		if len(filtered) >= limit {
+			break
+		}
+	}
+
+	return filtered, nil
 }
 
-func (r *SQLiteWebhookRepository) queryEvents(ctx context.Context, where string, limit int) ([]*WebhookEvent, error) {
-	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
+func (r *SQLiteWebhookRepository) queryEvents(ctx context.Context, where string, limit int, args ...interface{}) ([]*WebhookEvent, error) {
+	query := fmt.Sprintf(`
 		SELECT id, webhook_id, event_type, payload, status, attempts, next_retry,
 			response_code, response_body, error, created_at, delivered_at, duration_ms
-		FROM webhook_events WHERE %s LIMIT ?`, where), limit)
+		FROM webhook_events WHERE %s LIMIT ?`, where)
+	args = append(args, limit)
+	rows, err := r.queryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	var events []*WebhookEvent
 	for rows.Next() {
 		var event WebhookEvent
 		var idStr, webhookStr, eventType, status string
 		var payloadJSON string
-		
+
 		err := rows.Scan(&idStr, &webhookStr, &eventType, &payloadJSON, &status, &event.Attempts,
 			&event.NextRetry, &event.ResponseCode, &event.ResponseBody, &event.Error,
 			&event.CreatedAt, &event.DeliveredAt, &event.Duration)
 		if err != nil {
 			return nil, err
 		}
-		
+
 		event.ID, _ = uuid.Parse(idStr)
 		event.WebhookID, _ = uuid.Parse(webhookStr)
 		event.EventType = EventType(eventType)
 		event.Status = DeliveryStatus(status)
 		json.Unmarshal([]byte(payloadJSON), &event.Payload)
-		
+
 		events = append(events, &event)
 	}
-	
+
 	return events, rows.Err()
 }
 
 func (r *SQLiteWebhookRepository) GetDeliveryStats(ctx context.Context, webhookID uuid.UUID, days int) (*DeliveryStats, error) {
 	var stats DeliveryStats
-	
+
 	since := time.Now().AddDate(0, 0, -days)
-	
-	err := r.db.QueryRowContext(ctx, `
+
+	err := r.queryRowContext(ctx, `
 		SELECT 
 			COUNT(*) as total,
 			SUM(CASE WHEN status = 'delivered' THEN 1 ELSE 0 END) as delivered,
@@ -1316,6 +1416,6 @@ func (r *SQLiteWebhookRepository) GetDeliveryStats(ctx context.Context, webhookI
 			AVG(CASE WHEN status = 'delivered' THEN duration_ms ELSE NULL END) as avg_latency
 		FROM webhook_events WHERE webhook_id = ? AND created_at >= ?`,
 		webhookID.String(), since).Scan(&stats.Total, &stats.Delivered, &stats.Failed, &stats.Pending, &stats.AvgLatency)
-	
+
 	return &stats, err
 }

@@ -1,0 +1,77 @@
+---
+title: Health & Logs
+description: Use built-in health, log, queue, and spam commands to understand what the runtime is doing before you start guessing.
+---
+
+## Fast health pass
+
+```bash title="Core health checks"
+sudo lightr health check
+sudo lightr health stats
+curl http://127.0.0.1:8080/health
+```
+
+Use them differently:
+
+- `health check` confirms the config path, database reachability, and active ports
+- `health stats` gives you counts, queue state, and runtime metrics
+- `/health` is the simplest local readiness check
+
+## Systemd logs and native logs
+
+On the Linux installer path, start with systemd:
+
+```bash title="Watch the service"
+sudo journalctl -u lightr -f
+```
+
+If `logging.file` is configured, Lightr also exposes native log helpers:
+
+```bash title="Read native logs"
+sudo lightr logs show --since 1h --tail 200
+sudo lightr logs show --domain your-domain.com
+sudo lightr logs show --level error --component smtp
+```
+
+Useful notes:
+
+- `logs show` reads the native log file, not the journal
+- if the native file is missing on Linux, Lightr will point you back to `journalctl -u lightr`
+- domain filtering is substring-based, which is useful for both domains and email addresses
+
+## Queue checks
+
+When outbound delivery is unclear, inspect the queue instead of assuming the
+mail disappeared.
+
+```bash title="Queue inspection"
+sudo lightr queue pending --limit 50
+sudo lightr org list
+sudo lightr queue list --org "<org-name>" --status failed --limit 100
+```
+
+```bash title="Inspect or retry a queue item"
+sudo lightr queue get <message-id>
+sudo lightr queue retry <message-id>
+```
+
+Use `queue purge --older-than 7d` only when you are intentionally cleaning up
+delivered or failed history.
+
+## Spam and mailbox feedback
+
+```bash title="Spam inspection tools"
+sudo lightr spam feedback list
+sudo lightr spam feedback reset --sender sender@example.net
+sudo lightr spam scan --file ./sample.eml --ip 203.0.113.4 --helo mx.example.net --from bounce@example.net
+```
+
+These are helpful when messages are landing in `Junk`, getting quarantined, or
+behaving inconsistently across senders.
+
+## Good routine checks
+
+- run `health check` after config changes
+- watch `journalctl -u lightr -f` during first-domain rollout
+- inspect the queue before retrying blindly
+- use `domain verify` after every DNS change that should affect delivery

@@ -1,6 +1,7 @@
 package security
 
 import (
+	"context"
 	"net"
 	"testing"
 )
@@ -27,10 +28,13 @@ func TestSPFChecker_Check(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ip := net.ParseIP(tt.ip)
-			result := checker.Check(tt.domain, ip)
+			result, explanation := checker.Check(context.Background(), ip, tt.domain, "")
 			// Just verify we get a valid result
-			if result.Result == "" {
+			if result == "" {
 				t.Error("Expected non-empty result")
+			}
+			if explanation == "" {
+				t.Error("Expected non-empty explanation")
 			}
 		})
 	}
@@ -51,8 +55,8 @@ func TestSPFResult_String(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		if got := tt.result.String(); got != tt.want {
-			t.Errorf("SPFResult(%d).String() = %v, want %v", tt.result, got, tt.want)
+		if got := string(tt.result); got != tt.want {
+			t.Errorf("string(SPFResult(%q)) = %v, want %v", tt.result, got, tt.want)
 		}
 	}
 }

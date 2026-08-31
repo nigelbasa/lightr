@@ -1,0 +1,75 @@
+---
+title: Quickstart
+description: Start the installed runtime, validate the config, and get the host ready for the first managed domain.
+---
+
+This page starts **after** Lightr is installed. If you still need the binary,
+config paths, or service unit, go back to [Install](/docs/install).
+
+## 1. Confirm the binary and active config
+
+```bash title="Inspect the runtime and config"
+sudo lightr version
+sudo lightr config show
+sudo lightr config validate
+```
+
+If `config validate` fails, fix that before you touch DNS or create accounts.
+
+## 2. Review the generated hostname and ports
+
+```bash title="Inspect the generated config"
+sudo sed -n '1,200p' /etc/lightr/config.yaml
+```
+
+Before first start, confirm:
+
+- `server.hostname` is the runtime identity you intend to use
+- `http.addr` is reachable for local health and API checks
+- `smtp.addr` and `imap.addr` fit your current phase
+- `api.admin_key` is present and ready to replace if this is becoming real
+
+If you are evaluating locally, high ports such as `2525` and `1143` are fine.
+Move to standard ports only when the host, permissions, and firewall rules are
+ready for it.
+
+## 3. Start the service and check health
+
+```bash title="Bring up the runtime"
+sudo systemctl start lightr
+sudo systemctl enable lightr
+sudo systemctl status lightr
+```
+
+```bash title="Health checks"
+curl http://127.0.0.1:8080/health
+sudo lightr health check
+```
+
+You want:
+
+- `systemctl status` to show the service running
+- `/health` to return `{"status":"ok"}`
+- `health check` to print the active config path plus HTTP, SMTP, and IMAP ports
+
+## 4. Watch the runtime before adding domains
+
+```bash title="Systemd logs"
+sudo journalctl -u lightr -f
+```
+
+If native file logging is configured in `logging.file`, you can also use:
+
+```bash title="Native log file helpers"
+sudo lightr logs show --since 15m --tail 100
+sudo lightr logs show --level error --component smtp
+```
+
+The point of quickstart is simple: make sure the runtime itself is healthy
+before you widen into DNS, mailboxes, and client-facing addresses.
+
+## 5. Next step
+
+Once the runtime is healthy, move to
+[First Domain & Mailbox](/docs/first-domain) to create the first real mail
+surface.

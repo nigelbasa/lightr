@@ -34,16 +34,16 @@ type Warning struct {
 type WarningType string
 
 const (
-	WarningExternalSender     WarningType = "external_sender"
-	WarningFirstTimeContact   WarningType = "first_time_contact"
-	WarningSpoofingAttempt    WarningType = "spoofing_attempt"
-	WarningDomainSimilarity   WarningType = "domain_similarity"
-	WarningReplyToMismatch    WarningType = "reply_to_mismatch"
-	WarningDisplayNameSpoof   WarningType = "display_name_spoof"
-	WarningAuthFailure        WarningType = "auth_failure"
-	WarningSuspiciousLinks    WarningType = "suspicious_links"
-	WarningAttachmentRisk     WarningType = "attachment_risk"
-	WarningImpersonation      WarningType = "impersonation"
+	WarningExternalSender   WarningType = "external_sender"
+	WarningFirstTimeContact WarningType = "first_time_contact"
+	WarningSpoofingAttempt  WarningType = "spoofing_attempt"
+	WarningDomainSimilarity WarningType = "domain_similarity"
+	WarningReplyToMismatch  WarningType = "reply_to_mismatch"
+	WarningDisplayNameSpoof WarningType = "display_name_spoof"
+	WarningAuthFailure      WarningType = "auth_failure"
+	WarningSuspiciousLinks  WarningType = "suspicious_links"
+	WarningAttachmentRisk   WarningType = "attachment_risk"
+	WarningImpersonation    WarningType = "impersonation"
 )
 
 // Severity indicates warning importance
@@ -57,14 +57,14 @@ const (
 
 // Organization represents a known organization
 type Organization struct {
-	ID           uuid.UUID  `json:"id"`
-	Name         string     `json:"name"`
-	Domains      []string   `json:"domains"`
-	TrustLevel   TrustLevel `json:"trust_level"`
-	LogoURL      string     `json:"logo_url,omitempty"`
-	VerifiedAt   *time.Time `json:"verified_at,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	ID         uuid.UUID  `json:"id"`
+	Name       string     `json:"name"`
+	Domains    []string   `json:"domains"`
+	TrustLevel TrustLevel `json:"trust_level"`
+	LogoURL    string     `json:"logo_url,omitempty"`
+	VerifiedAt *time.Time `json:"verified_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
 }
 
 // OrgRecognizer identifies organizations and generates warnings
@@ -111,7 +111,7 @@ func NewOrgRecognizer(repo OrgRepository, cfg *RecognizerConfig) *OrgRecognizer 
 // EmailContext contains email metadata for analysis
 type EmailContext struct {
 	From           string
-	FromName       string   // Display name
+	FromName       string // Display name
 	ReplyTo        string
 	To             []string
 	Subject        string
@@ -126,12 +126,12 @@ type EmailContext struct {
 
 // AnalysisResult contains organization recognition results
 type AnalysisResult struct {
-	SenderOrg     *Organization
-	TrustLevel    TrustLevel
-	Warnings      []Warning
-	Headers       map[string]string // Headers to add to email
-	ShouldBlock   bool
-	BlockReason   string
+	SenderOrg   *Organization
+	TrustLevel  TrustLevel
+	Warnings    []Warning
+	Headers     map[string]string // Headers to add to email
+	ShouldBlock bool
+	BlockReason string
 }
 
 // Analyze examines an email for organization and security indicators
@@ -149,7 +149,7 @@ func (r *OrgRecognizer) Analyze(ctx *EmailContext, recipientEmail string) (*Anal
 	// Check if sender is internal
 	if r.isInternalDomain(senderDomain) {
 		result.TrustLevel = TrustInternal
-		
+
 		// Internal sender but auth failed? Big red flag!
 		if ctx.SPFResult == "fail" || ctx.DMARCResult == "fail" {
 			result.Warnings = append(result.Warnings, Warning{
@@ -315,7 +315,7 @@ func (r *OrgRecognizer) checkDomainSimilarity(senderDomain string) *Warning {
 
 	for _, internal := range r.internalDomains {
 		internal = strings.ToLower(internal)
-		
+
 		// Skip if same domain
 		if senderDomain == internal {
 			continue
@@ -385,18 +385,18 @@ func calculateSimilarity(a, b string) float64 {
 	if a == b {
 		return 1.0
 	}
-	
+
 	// Levenshtein distance based similarity
 	distance := levenshteinDistance(a, b)
 	maxLen := len(a)
 	if len(b) > maxLen {
 		maxLen = len(b)
 	}
-	
+
 	if maxLen == 0 {
 		return 1.0
 	}
-	
+
 	return 1.0 - float64(distance)/float64(maxLen)
 }
 
@@ -492,7 +492,7 @@ func isSuspiciousSimilar(suspect, legitimate string) bool {
 		if len(legitBase) > len(suspectBase) {
 			longer, shorter = legitBase, suspectBase
 		}
-		
+
 		for i := 0; i < len(longer); i++ {
 			modified := longer[:i] + longer[i+1:]
 			if modified == shorter {
@@ -522,20 +522,47 @@ func compareSeverity(a, b Severity) int {
 
 // SQLiteOrgRepository implements OrgRepository
 type SQLiteOrgRepository struct {
-	db *sql.DB
+	db     *sql.DB
+	driver string
 }
 
 // NewSQLiteOrgRepository creates a new org repository
 func NewSQLiteOrgRepository(db *sql.DB) (*SQLiteOrgRepository, error) {
-	repo := &SQLiteOrgRepository{db: db}
+	return NewSQLOrgRepository(db, "sqlite")
+}
+
+func NewPostgresOrgRepository(db *sql.DB) (*SQLiteOrgRepository, error) {
+	return NewSQLOrgRepository(db, "postgres")
+}
+
+func NewSQLOrgRepository(db *sql.DB, driver string) (*SQLiteOrgRepository, error) {
+	repo := &SQLiteOrgRepository{db: db, driver: driver}
 	if err := repo.migrate(); err != nil {
 		return nil, err
 	}
 	return repo, nil
 }
 
+func (r *SQLiteOrgRepository) bind(query string) string {
+	if r.driver != "postgres" {
+		return query
+	}
+
+	var out strings.Builder
+	index := 1
+	for _, ch := range query {
+		if ch == '?' {
+			out.WriteString(fmt.Sprintf("$%d", index))
+			index++
+			continue
+		}
+		out.WriteRune(ch)
+	}
+	return out.String()
+}
+
 func (r *SQLiteOrgRepository) migrate() error {
-	_, err := r.db.Exec(`
+	_, err := r.db.Exec(r.bind(`
 		CREATE TABLE IF NOT EXISTS known_organizations (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
@@ -557,23 +584,23 @@ func (r *SQLiteOrgRepository) migrate() error {
 			PRIMARY KEY (sender_email, recipient_email)
 		);
 		CREATE INDEX IF NOT EXISTS idx_contacts_recipient ON sender_contacts(recipient_email);
-	`)
+	`))
 	return err
 }
 
 func (r *SQLiteOrgRepository) GetByDomain(domain string) (*Organization, error) {
-	row := r.db.QueryRow(`
+	row := r.db.QueryRow(r.bind(`
 		SELECT id, name, domains, trust_level, logo_url, verified_at, created_at, updated_at
 		FROM known_organizations WHERE domains LIKE ?
-	`, "%"+domain+"%")
+	`), "%"+domain+"%")
 	return r.scanOrg(row)
 }
 
 func (r *SQLiteOrgRepository) GetByID(id uuid.UUID) (*Organization, error) {
-	row := r.db.QueryRow(`
+	row := r.db.QueryRow(r.bind(`
 		SELECT id, name, domains, trust_level, logo_url, verified_at, created_at, updated_at
 		FROM known_organizations WHERE id = ?
-	`, id.String())
+	`), id.String())
 	return r.scanOrg(row)
 }
 
@@ -583,27 +610,27 @@ func (r *SQLiteOrgRepository) Create(org *Organization) error {
 	}
 	org.CreatedAt = time.Now()
 	org.UpdatedAt = time.Now()
-	
+
 	domains := strings.Join(org.Domains, ",")
-	_, err := r.db.Exec(`
+	_, err := r.db.Exec(r.bind(`
 		INSERT INTO known_organizations (id, name, domains, trust_level, logo_url, verified_at, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, org.ID.String(), org.Name, domains, org.TrustLevel, org.LogoURL, org.VerifiedAt, org.CreatedAt, org.UpdatedAt)
+	`), org.ID.String(), org.Name, domains, org.TrustLevel, org.LogoURL, org.VerifiedAt, org.CreatedAt, org.UpdatedAt)
 	return err
 }
 
 func (r *SQLiteOrgRepository) Update(org *Organization) error {
 	org.UpdatedAt = time.Now()
 	domains := strings.Join(org.Domains, ",")
-	_, err := r.db.Exec(`
+	_, err := r.db.Exec(r.bind(`
 		UPDATE known_organizations SET name = ?, domains = ?, trust_level = ?, logo_url = ?, verified_at = ?, updated_at = ?
 		WHERE id = ?
-	`, org.Name, domains, org.TrustLevel, org.LogoURL, org.VerifiedAt, org.UpdatedAt, org.ID.String())
+	`), org.Name, domains, org.TrustLevel, org.LogoURL, org.VerifiedAt, org.UpdatedAt, org.ID.String())
 	return err
 }
 
 func (r *SQLiteOrgRepository) List() ([]*Organization, error) {
-	rows, err := r.db.Query(`SELECT id, name, domains, trust_level, logo_url, verified_at, created_at, updated_at FROM known_organizations ORDER BY name`)
+	rows, err := r.db.Query(r.bind(`SELECT id, name, domains, trust_level, logo_url, verified_at, created_at, updated_at FROM known_organizations ORDER BY name`))
 	if err != nil {
 		return nil, err
 	}
@@ -621,23 +648,23 @@ func (r *SQLiteOrgRepository) List() ([]*Organization, error) {
 }
 
 func (r *SQLiteOrgRepository) RecordContact(senderEmail, recipientEmail string) error {
-	_, err := r.db.Exec(`
+	_, err := r.db.Exec(r.bind(`
 		INSERT INTO sender_contacts (sender_email, recipient_email)
 		VALUES (?, ?)
 		ON CONFLICT (sender_email, recipient_email) DO UPDATE SET
 			last_contact = CURRENT_TIMESTAMP,
 			contact_count = contact_count + 1
-	`, strings.ToLower(senderEmail), strings.ToLower(recipientEmail))
+	`), strings.ToLower(senderEmail), strings.ToLower(recipientEmail))
 	return err
 }
 
 func (r *SQLiteOrgRepository) IsFirstContact(senderEmail, recipientEmail string) (bool, error) {
 	var count int
-	err := r.db.QueryRow(`
+	err := r.db.QueryRow(r.bind(`
 		SELECT contact_count FROM sender_contacts
 		WHERE sender_email = ? AND recipient_email = ?
-	`, strings.ToLower(senderEmail), strings.ToLower(recipientEmail)).Scan(&count)
-	
+	`), strings.ToLower(senderEmail), strings.ToLower(recipientEmail)).Scan(&count)
+
 	if err == sql.ErrNoRows {
 		return true, nil
 	}
@@ -652,20 +679,20 @@ func (r *SQLiteOrgRepository) SearchContacts(senderEmail, query string, limit in
 	if limit <= 0 {
 		limit = 10
 	}
-	
+
 	// Search for contacts where this sender has sent emails, ordered by frequency
-	rows, err := r.db.Query(`
+	rows, err := r.db.Query(r.bind(`
 		SELECT recipient_email, contact_count, last_contact
 		FROM sender_contacts
 		WHERE sender_email = ? AND recipient_email LIKE ?
 		ORDER BY contact_count DESC, last_contact DESC
 		LIMIT ?
-	`, strings.ToLower(senderEmail), "%"+strings.ToLower(query)+"%", limit)
+	`), strings.ToLower(senderEmail), "%"+strings.ToLower(query)+"%", limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	var contacts []Contact
 	for rows.Next() {
 		var c Contact
@@ -674,7 +701,7 @@ func (r *SQLiteOrgRepository) SearchContacts(senderEmail, query string, limit in
 		}
 		contacts = append(contacts, c)
 	}
-	
+
 	return contacts, rows.Err()
 }
 

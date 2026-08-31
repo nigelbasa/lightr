@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -11,46 +12,26 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nigelbasa/lightr/internal/alias"
+	"github.com/nigelbasa/lightr/internal/apikeys"
 	"github.com/nigelbasa/lightr/internal/domain"
 	"github.com/nigelbasa/lightr/internal/smtp"
+	"github.com/nigelbasa/lightr/internal/spam"
+	"github.com/nigelbasa/lightr/internal/webhooks"
 	"golang.org/x/crypto/bcrypt"
 )
 
-// APIKeyMiddleware validates API key from Authorization header
-func APIKeyMiddleware(apiKey string, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Skip auth for health check
-		if r.URL.Path == "/health" {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		auth := r.Header.Get("Authorization")
-		if auth == "" {
-			http.Error(w, "missing Authorization header", http.StatusUnauthorized)
-			return
-		}
-
-		// Support "Bearer <key>" or just "<key>"
-		key := strings.TrimPrefix(auth, "Bearer ")
-		if key != apiKey {
-			http.Error(w, "invalid API key", http.StatusUnauthorized)
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
-}
-
 type Handler struct {
-	accountRepo  domain.AccountRepository
-	domainRepo   domain.DomainRepository
-	orgRepo      domain.OrganizationRepository
-	messageRepo  domain.MessageRepository
-	templateRepo domain.TemplateRepository
-	trackingRepo domain.TrackingEventRepository
-	blobStorage  domain.BlobStorage
-	relay        *smtp.Relay
+	accountRepo    domain.AccountRepository
+	domainRepo     domain.DomainRepository
+	orgRepo        domain.OrganizationRepository
+	messageRepo    domain.MessageRepository
+	blobStorage    domain.BlobStorage
+	relay          *smtp.Relay
+	apikeyService  *apikeys.APIKeyService
+	aliasRepo      alias.Repository
+	webhookService *webhooks.WebhookService
+	serverHostname string
 }
 
 func NewHandler(
@@ -58,21 +39,37 @@ func NewHandler(
 	domRepo domain.DomainRepository,
 	orgRepo domain.OrganizationRepository,
 	msgRepo domain.MessageRepository,
-	tmplRepo domain.TemplateRepository,
-	trackRepo domain.TrackingEventRepository,
 	blobStorage domain.BlobStorage,
 	relay *smtp.Relay,
 ) *Handler {
 	return &Handler{
-		accountRepo:  accRepo,
-		domainRepo:   domRepo,
-		orgRepo:      orgRepo,
-		messageRepo:  msgRepo,
-		templateRepo: tmplRepo,
-		trackingRepo: trackRepo,
-		blobStorage:  blobStorage,
-		relay:        relay,
+		accountRepo: accRepo,
+		domainRepo:  domRepo,
+		orgRepo:     orgRepo,
+		messageRepo: msgRepo,
+		blobStorage: blobStorage,
+		relay:       relay,
 	}
+}
+
+func (h *Handler) WithAPIKeyService(service *apikeys.APIKeyService) *Handler {
+	h.apikeyService = service
+	return h
+}
+
+func (h *Handler) WithAliasRepo(repo alias.Repository) *Handler {
+	h.aliasRepo = repo
+	return h
+}
+
+func (h *Handler) WithWebhookService(service *webhooks.WebhookService) *Handler {
+	h.webhookService = service
+	return h
+}
+
+func (h *Handler) WithServerHostname(hostname string) *Handler {
+	h.serverHostname = strings.TrimSpace(hostname)
+	return h
 }
 
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
@@ -83,16 +80,36 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/orgs", h.HandleListOrgs)
 	mux.HandleFunc("POST /v1/orgs", h.HandleCreateOrg)
 	mux.HandleFunc("GET /v1/orgs/{id}", h.HandleGetOrg)
+	mux.HandleFunc("GET /v1/apikeys", h.HandleListAPIKeys)
+	mux.HandleFunc("POST /v1/apikeys", h.HandleCreateAPIKey)
+	mux.HandleFunc("POST /v1/apikeys/{id}/rotate", h.HandleRotateAPIKey)
+	mux.HandleFunc("POST /v1/apikeys/{id}/revoke", h.HandleRevokeAPIKey)
+	mux.HandleFunc("DELETE /v1/apikeys/{id}", h.HandleDeleteAPIKey)
 
 	// Domains
+	mux.HandleFunc("GET /v1/domains", h.HandleListDomains)
 	mux.HandleFunc("GET /v1/orgs/{org_id}/domains", h.HandleListDomains)
 	mux.HandleFunc("POST /v1/domains", h.HandleCreateDomain)
 	mux.HandleFunc("GET /v1/domains/{id}", h.HandleGetDomain)
+	mux.HandleFunc("PATCH /v1/domains/{id}", h.HandleUpdateDomain)
+	mux.HandleFunc("DELETE /v1/domains/{id}", h.HandleDeleteDomain)
+	mux.HandleFunc("GET /v1/domains/{id}/dns", h.HandleGetDomainDNS)
+	mux.HandleFunc("POST /v1/domains/{id}/verify", h.HandleVerifyDomain)
+	mux.HandleFunc("POST /v1/domains/{id}/auth-webhook/verify", h.HandleVerifyDomainAuthWebhook)
+	mux.HandleFunc("POST /v1/domains/{id}/auth-webhook/rotate-secret", h.HandleRotateDomainAuthWebhookSecret)
 
 	// Accounts
+	mux.HandleFunc("GET /v1/accounts", h.HandleListAccounts)
 	mux.HandleFunc("POST /v1/accounts", h.HandleCreateAccount)
 	mux.HandleFunc("GET /v1/accounts/{id}", h.HandleGetAccount)
+	mux.HandleFunc("PATCH /v1/accounts/{id}", h.HandleUpdateAccount)
 	mux.HandleFunc("DELETE /v1/accounts/{id}", h.HandleDeleteAccount)
+
+	// Aliases
+	mux.HandleFunc("GET /v1/aliases", h.HandleListAliases)
+	mux.HandleFunc("POST /v1/aliases", h.HandleCreateAlias)
+	mux.HandleFunc("PATCH /v1/aliases/{id}", h.HandleUpdateAlias)
+	mux.HandleFunc("DELETE /v1/aliases/{id}", h.HandleDeleteAlias)
 
 	// Messages
 	mux.HandleFunc("GET /v1/accounts/{account_id}/messages", h.HandleListMessages)
@@ -109,20 +126,18 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/mailbox/contacts", h.HandleMailboxContacts)       // Contact autocomplete
 	mux.HandleFunc("PATCH /v1/mailbox/account", h.HandleUpdateMailboxAccount) // Update display name etc
 
-	// RFC 8058 One-Click Unsubscribe endpoint
-	mux.HandleFunc("POST /unsubscribe/{msg_id}", h.HandleUnsubscribe)
-	mux.HandleFunc("GET /unsubscribe/{msg_id}", h.HandleUnsubscribePage)
-
-	// Templates
-	mux.HandleFunc("POST /v1/templates", h.HandleCreateTemplate)
-	mux.HandleFunc("GET /v1/orgs/{org_id}/templates", h.HandleListTemplates)
-	mux.HandleFunc("GET /v1/templates/{org_id}/{name}", h.HandleGetTemplate)
+	// Webhooks
+	mux.HandleFunc("GET /v1/webhooks", h.HandleListWebhooks)
+	mux.HandleFunc("POST /v1/webhooks", h.HandleCreateWebhook)
+	mux.HandleFunc("GET /v1/webhooks/{id}", h.HandleGetWebhook)
+	mux.HandleFunc("PATCH /v1/webhooks/{id}", h.HandleUpdateWebhook)
+	mux.HandleFunc("DELETE /v1/webhooks/{id}", h.HandleDeleteWebhook)
+	mux.HandleFunc("POST /v1/webhooks/{id}/verify", h.HandleVerifyWebhook)
+	mux.HandleFunc("GET /v1/webhooks/{id}/events", h.HandleListWebhookEvents)
+	mux.HandleFunc("GET /v1/webhooks/{id}/stats", h.HandleWebhookStats)
 
 	// Send
 	mux.HandleFunc("POST /v1/send", h.HandleSend)
-
-	// Stats
-	mux.HandleFunc("GET /v1/messages/{id}/tracking", h.HandleGetTrackingStats)
 }
 
 func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
@@ -131,8 +146,25 @@ func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 type CreateDomainRequest struct {
-	OrgID string `json:"org_id"`
-	Name  string `json:"name"`
+	OrgID              string `json:"org_id,omitempty"`
+	Org                string `json:"org,omitempty"`
+	Name               string `json:"name"`
+	MailHostname       string `json:"mail_hostname,omitempty"`
+	DKIMSelector       string `json:"dkim_selector,omitempty"`
+	DKIMPrivateKey     string `json:"dkim_private_key,omitempty"`
+	WebhookURL         string `json:"webhook_url,omitempty"`
+	AuthWebhookURL     string `json:"auth_webhook_url,omitempty"`
+	TLSCertFile        string `json:"tls_cert_file,omitempty"`
+	TLSKeyFile         string `json:"tls_key_file,omitempty"`
+	RelayEnabled       *bool  `json:"relay_enabled,omitempty"`
+	RelayHost          string `json:"relay_host,omitempty"`
+	RelayPort          int    `json:"relay_port,omitempty"`
+	RelayUsername      string `json:"relay_username,omitempty"`
+	RelayPassword      string `json:"relay_password,omitempty"`
+	RelayUseTLS        *bool  `json:"relay_use_tls,omitempty"`
+	RelayTLSSkipVerify *bool  `json:"relay_tls_skip_verify,omitempty"`
+	SpamPolicy         string `json:"spam_policy,omitempty"`
+	Verified           *bool  `json:"verified,omitempty"`
 }
 
 func (h *Handler) HandleCreateDomain(w http.ResponseWriter, r *http.Request) {
@@ -141,19 +173,55 @@ func (h *Handler) HandleCreateDomain(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if strings.TrimSpace(req.Name) == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
 
-	orgID, err := uuid.Parse(req.OrgID)
+	orgID, err := h.resolveOrgRefOrDefault(req.OrgID, req.Org)
 	if err != nil {
-		http.Error(w, "invalid org_id", http.StatusBadRequest)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !h.authorizeOrg(w, r, orgID, apikeys.PermManageDomain) {
 		return
 	}
 
 	dom := &domain.Domain{
-		ID:           uuid.New(),
-		OrgID:        orgID,
-		Name:         req.Name,
-		DKIMSelector: "default", // default selector
-		IsVerified:   false,
+		ID:                 uuid.New(),
+		OrgID:              orgID,
+		Name:               req.Name,
+		MailHostname:       req.MailHostname,
+		DKIMSelector:       firstNonEmpty(req.DKIMSelector, "default"),
+		DKIMPrivateKey:     req.DKIMPrivateKey,
+		WebhookURL:         req.WebhookURL,
+		AuthWebhookURL:     req.AuthWebhookURL,
+		TLSCertFile:        req.TLSCertFile,
+		TLSKeyFile:         req.TLSKeyFile,
+		RelayEnabled:       req.RelayEnabled != nil && *req.RelayEnabled,
+		RelayHost:          req.RelayHost,
+		RelayPort:          req.RelayPort,
+		RelayUsername:      req.RelayUsername,
+		RelayPassword:      req.RelayPassword,
+		RelayUseTLS:        req.RelayUseTLS != nil && *req.RelayUseTLS,
+		RelayTLSSkipVerify: req.RelayTLSSkipVerify != nil && *req.RelayTLSSkipVerify,
+		SpamPolicy:         firstNonEmpty(req.SpamPolicy, "junk"),
+		IsVerified:         req.Verified != nil && *req.Verified,
+	}
+	if strings.TrimSpace(dom.DKIMPrivateKey) == "" {
+		keyPair, err := smtp.GenerateDKIMKey(2048, dom.DKIMSelector)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		dom.DKIMPrivateKey = keyPair.PrivateKeyPEM
+	}
+	if err := domain.EnsureAuthWebhookSecret(dom); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if strings.TrimSpace(dom.AuthWebhookURL) == "" {
+		domain.ResetAuthWebhookVerification(dom)
 	}
 
 	if err := h.domainRepo.CreateDomain(dom); err != nil {
@@ -166,12 +234,15 @@ func (h *Handler) HandleCreateDomain(w http.ResponseWriter, r *http.Request) {
 }
 
 type CreateAccountRequest struct {
-	DomainID   string `json:"domain_id"`
-	LocalPart  string `json:"local_part"`
-	AuthMode   string `json:"auth_mode"`
-	Password   string `json:"password,omitempty"`
-	ExternalID string `json:"external_id,omitempty"`
-	QuotaBytes int64  `json:"quota_bytes"`
+	DomainID    string `json:"domain_id,omitempty"`
+	Domain      string `json:"domain,omitempty"`
+	Email       string `json:"email,omitempty"`
+	LocalPart   string `json:"local_part,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+	AuthMode    string `json:"auth_mode"`
+	Password    string `json:"password,omitempty"`
+	ExternalID  string `json:"external_id,omitempty"`
+	QuotaBytes  int64  `json:"quota_bytes"`
 }
 
 func (h *Handler) HandleCreateAccount(w http.ResponseWriter, r *http.Request) {
@@ -181,19 +252,50 @@ func (h *Handler) HandleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	domID, err := uuid.Parse(req.DomainID)
+	domID, err := h.resolveDomainRef(req.DomainID, req.Domain)
 	if err != nil {
-		http.Error(w, "invalid domain_id", http.StatusBadRequest)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !h.authorizeDomain(w, r, domID, apikeys.PermManageUser) {
+		return
+	}
+
+	localPart := req.LocalPart
+	if localPart == "" && req.Email != "" {
+		parts := strings.Split(req.Email, "@")
+		if len(parts) != 2 {
+			http.Error(w, "invalid email", http.StatusBadRequest)
+			return
+		}
+		localPart = parts[0]
+	}
+	if localPart == "" {
+		http.Error(w, "local_part or email is required", http.StatusBadRequest)
 		return
 	}
 
 	acc := &domain.Account{
-		ID:         uuid.New(),
-		DomainID:   domID,
-		LocalPart:  req.LocalPart,
-		AuthMode:   domain.AuthMode(req.AuthMode),
-		ExternalID: req.ExternalID,
-		QuotaBytes: req.QuotaBytes,
+		ID:          uuid.New(),
+		DomainID:    domID,
+		LocalPart:   localPart,
+		DisplayName: req.DisplayName,
+		AuthMode:    domain.AuthMode(firstNonEmpty(strings.ToLower(req.AuthMode), string(domain.AuthModeNative))),
+		ExternalID:  req.ExternalID,
+		QuotaBytes:  req.QuotaBytes,
+	}
+	dom, err := h.domainRepo.GetDomainByID(domID)
+	if err != nil {
+		http.Error(w, "domain not found", http.StatusBadRequest)
+		return
+	}
+	if err := domain.ValidateAccountAuthMode(dom, acc.AuthMode); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if acc.AuthMode == domain.AuthModeNative && strings.TrimSpace(req.Password) == "" {
+		http.Error(w, "password is required for native accounts", http.StatusBadRequest)
+		return
 	}
 
 	// Handle password hashing for native auth
@@ -228,6 +330,9 @@ func (h *Handler) HandleGetAccount(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "account not found", http.StatusNotFound)
 		return
 	}
+	if !h.authorizeAccount(w, r, acc.ID, apikeys.PermManageUser) {
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(acc)
@@ -247,9 +352,33 @@ func (h *Handler) HandleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if h.requirePermission(w, r, apikeys.PermSendEmail) == nil {
+		return
+	}
+	if strings.TrimSpace(req.From) == "" || strings.TrimSpace(req.To) == "" {
+		http.Error(w, "from and to are required", http.StatusBadRequest)
+		return
+	}
+	acc, err := h.getAccountByEmail(req.From)
+	if err != nil {
+		http.Error(w, "sender account not found", http.StatusForbidden)
+		return
+	}
+	if !h.authorizeAccount(w, r, acc.ID, apikeys.PermSendEmail) {
+		return
+	}
+	dom, err := h.domainRepo.GetDomainByID(acc.DomainID)
+	if err != nil {
+		http.Error(w, "sender domain not found", http.StatusForbidden)
+		return
+	}
 
 	// Basic RFC822 message construction (very simple for now)
-	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s", req.From, req.To, req.Subject, req.Text)
+	fromDomain := strings.Split(req.From, "@")[1]
+	mailHost := domain.EffectiveMailHostname(dom, h.serverHostname)
+	msgID := fmt.Sprintf("<%s@%s>", uuid.NewString(), fromDomain)
+	msg := fmt.Sprintf("Message-ID: %s\r\nFrom: %s\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nUser-Agent: Lightr API\r\nX-Mailer: Lightr\r\nX-Lightr-Mailed-By: %s\r\n\r\n%s",
+		msgID, req.From, req.To, req.Subject, time.Now().Format(time.RFC1123Z), mailHost, req.Text)
 
 	if err := h.relay.Send(r.Context(), req.From, []string{req.To}, []byte(msg)); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -263,34 +392,46 @@ func (h *Handler) HandleSend(w http.ResponseWriter, r *http.Request) {
 // Organization handlers
 
 func (h *Handler) HandleListOrgs(w http.ResponseWriter, r *http.Request) {
+	if !h.requireGlobalPermission(w, r, apikeys.PermManageOrg) {
+		return
+	}
 	orgs, err := h.orgRepo.ListOrgs()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if !strings.EqualFold(r.URL.Query().Get("include_default"), "true") {
+		orgs = h.filterVisibleOrganizations(orgs)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(orgs)
 }
 
 type CreateOrgRequest struct {
-	Name        string `json:"name"`
-	BillingTier string `json:"billing_tier"`
+	Name string `json:"name"`
 }
 
 func (h *Handler) HandleCreateOrg(w http.ResponseWriter, r *http.Request) {
+	if !h.requireGlobalPermission(w, r, apikeys.PermManageOrg) {
+		return
+	}
 	var req CreateOrgRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if strings.TrimSpace(req.Name) == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	if domain.IsDefaultOrganizationName(req.Name) {
+		http.Error(w, "default organization name is reserved", http.StatusConflict)
+		return
+	}
 
 	org := &domain.Organization{
-		ID:          uuid.New(),
-		Name:        req.Name,
-		BillingTier: req.BillingTier,
-	}
-	if org.BillingTier == "" {
-		org.BillingTier = "free"
+		ID:   uuid.New(),
+		Name: req.Name,
 	}
 
 	if err := h.orgRepo.CreateOrg(org); err != nil {
@@ -315,6 +456,9 @@ func (h *Handler) HandleGetOrg(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "organization not found", http.StatusNotFound)
 		return
 	}
+	if !h.authorizeOrg(w, r, org.ID, apikeys.PermManageOrg) {
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(org)
@@ -323,13 +467,34 @@ func (h *Handler) HandleGetOrg(w http.ResponseWriter, r *http.Request) {
 // Domain handlers
 
 func (h *Handler) HandleListDomains(w http.ResponseWriter, r *http.Request) {
-	orgID, err := uuid.Parse(r.PathValue("org_id"))
-	if err != nil {
-		http.Error(w, "invalid org_id", http.StatusBadRequest)
+	key := h.requirePermission(w, r, apikeys.PermManageDomain)
+	if key == nil && getScopedAPIKey(r.Context()) != nil {
 		return
 	}
 
-	domains, err := h.domainRepo.ListDomainsByOrg(orgID)
+	orgIDRef := strings.TrimSpace(r.PathValue("org_id"))
+	if orgIDRef == "" {
+		orgIDRef = strings.TrimSpace(r.URL.Query().Get("org_id"))
+	}
+	orgNameRef := strings.TrimSpace(r.URL.Query().Get("org"))
+
+	var (
+		domains []*domain.Domain
+		err     error
+	)
+	if orgIDRef != "" || orgNameRef != "" {
+		orgID, resolveErr := h.resolveOrgRef(orgIDRef, orgNameRef)
+		if resolveErr != nil {
+			http.Error(w, resolveErr.Error(), http.StatusBadRequest)
+			return
+		}
+		if !h.authorizeOrg(w, r, orgID, apikeys.PermManageDomain) {
+			return
+		}
+		domains, err = h.domainRepo.ListDomainsByOrg(orgID)
+	} else {
+		domains, err = h.listAccessibleDomains(key)
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -351,7 +516,106 @@ func (h *Handler) HandleGetDomain(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "domain not found", http.StatusNotFound)
 		return
 	}
+	if !h.authorizeDomain(w, r, dom.ID, apikeys.PermManageDomain) {
+		return
+	}
 
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(dom)
+}
+
+func (h *Handler) HandleUpdateDomain(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if !h.authorizeDomain(w, r, id, apikeys.PermManageDomain) {
+		return
+	}
+	dom, err := h.domainRepo.GetDomainByID(id)
+	if err != nil {
+		http.Error(w, "domain not found", http.StatusNotFound)
+		return
+	}
+	var req CreateDomainRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Name != "" {
+		dom.Name = req.Name
+	}
+	if req.MailHostname != "" {
+		dom.MailHostname = req.MailHostname
+	}
+	if req.DKIMSelector != "" {
+		dom.DKIMSelector = req.DKIMSelector
+	}
+	if req.DKIMPrivateKey != "" {
+		dom.DKIMPrivateKey = req.DKIMPrivateKey
+	}
+	if req.WebhookURL != "" {
+		dom.WebhookURL = req.WebhookURL
+	}
+	if req.AuthWebhookURL != "" {
+		if !strings.EqualFold(dom.AuthWebhookURL, req.AuthWebhookURL) {
+			domain.ResetAuthWebhookVerification(dom)
+		}
+		dom.AuthWebhookURL = req.AuthWebhookURL
+		if err := domain.EnsureAuthWebhookSecret(dom); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	if req.TLSCertFile != "" {
+		dom.TLSCertFile = req.TLSCertFile
+	}
+	if req.TLSKeyFile != "" {
+		dom.TLSKeyFile = req.TLSKeyFile
+	}
+	if req.RelayEnabled != nil {
+		dom.RelayEnabled = *req.RelayEnabled
+	}
+	if req.RelayHost != "" {
+		dom.RelayHost = req.RelayHost
+	}
+	if req.RelayPort != 0 {
+		dom.RelayPort = req.RelayPort
+	}
+	if req.RelayUsername != "" {
+		dom.RelayUsername = req.RelayUsername
+	}
+	if req.RelayPassword != "" {
+		dom.RelayPassword = req.RelayPassword
+	}
+	if req.RelayUseTLS != nil {
+		dom.RelayUseTLS = *req.RelayUseTLS
+	}
+	if req.RelayTLSSkipVerify != nil {
+		dom.RelayTLSSkipVerify = *req.RelayTLSSkipVerify
+	}
+	if req.SpamPolicy != "" {
+		dom.SpamPolicy = req.SpamPolicy
+	}
+	if req.Verified != nil {
+		dom.IsVerified = *req.Verified
+	}
+	if dom.DKIMSelector == "" {
+		dom.DKIMSelector = "default"
+	}
+	if strings.TrimSpace(dom.DKIMPrivateKey) == "" {
+		keyPair, err := smtp.GenerateDKIMKey(2048, dom.DKIMSelector)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		dom.DKIMPrivateKey = keyPair.PrivateKeyPEM
+	}
+	if err := h.domainRepo.UpdateDomain(dom); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(dom)
 }
@@ -365,6 +629,9 @@ func (h *Handler) HandleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !h.authorizeAccount(w, r, id, apikeys.PermManageUser) {
+		return
+	}
 	if err := h.accountRepo.DeleteAccount(id); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -379,6 +646,9 @@ func (h *Handler) HandleListMessages(w http.ResponseWriter, r *http.Request) {
 	accountID, err := uuid.Parse(r.PathValue("account_id"))
 	if err != nil {
 		http.Error(w, "invalid account_id", http.StatusBadRequest)
+		return
+	}
+	if !h.authorizeAccount(w, r, accountID, apikeys.PermReadEmail) {
 		return
 	}
 
@@ -407,6 +677,9 @@ func (h *Handler) HandleGetMessage(w http.ResponseWriter, r *http.Request) {
 	msg, err := h.messageRepo.GetMessageByID(id)
 	if err != nil {
 		http.Error(w, "message not found", http.StatusNotFound)
+		return
+	}
+	if !h.authorizeAccount(w, r, msg.AccountID, apikeys.PermReadEmail) {
 		return
 	}
 
@@ -450,6 +723,9 @@ func (h *Handler) HandleGetMailbox(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	if !h.authorizeAccount(w, r, acc.ID, apikeys.PermManageMailbox) {
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -481,6 +757,9 @@ func (h *Handler) HandleMailboxList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	if !h.authorizeAccount(w, r, acc.ID, apikeys.PermReadEmail) {
+		return
+	}
 
 	messages, err := h.messageRepo.ListByAccount(acc.ID, folder)
 	if err != nil {
@@ -491,16 +770,32 @@ func (h *Handler) HandleMailboxList(w http.ResponseWriter, r *http.Request) {
 	// Return in a standard format
 	result := make([]map[string]interface{}, len(messages))
 	for i, msg := range messages {
+		metadata := h.messageMetadata(msg)
 		result[i] = map[string]interface{}{
-			"id":      msg.ID,
-			"from":    msg.From,
-			"to":      msg.To,
-			"subject": msg.Subject,
-			"date":    msg.ReceivedAt,
-			"read":    msg.ReadAt != nil,
-			"folder":  msg.Folder,
-			"size":    msg.SizeBytes,
-			"preview": msg.Subject, // We can add a preview field later
+			"id":                  msg.ID,
+			"from":                msg.From,
+			"to":                  msg.To,
+			"subject":             msg.Subject,
+			"date":                msg.ReceivedAt,
+			"read":                msg.ReadAt != nil,
+			"folder":              msg.Folder,
+			"size":                msg.SizeBytes,
+			"preview":             msg.Subject, // We can add a preview field later
+			"spam_status":         metadata["X-Spam-Status"],
+			"spam_score":          metadata["X-Spam-Score"],
+			"mailed_by":           metadata["X-Lightr-Mailed-By"],
+			"signed_by":           metadata["X-Lightr-Signed-By"],
+			"remote_ip":           metadata["X-Lightr-Remote-IP"],
+			"auth_results":        metadata["Authentication-Results"],
+			"received_spf":        metadata["Received-SPF"],
+			"message_id":          firstNonEmpty(metadata["Message-ID"], metadata["Message-Id"]),
+			"return_path":         metadata["Return-Path"],
+			"spam_reasons":        metadata["X-Lightr-Spam-Reasons"],
+			"dnsbl_hits":          metadata["X-Lightr-DNSBL-Hits"],
+			"user_classification": metadata["X-Lightr-User-Classification"],
+			"reply_to":            metadata["Reply-To"],
+			"sender":              metadata["Sender"],
+			"arc_seal":            metadata["ARC-Seal"],
 		}
 	}
 
@@ -531,6 +826,9 @@ func (h *Handler) HandleMailboxGetMessage(w http.ResponseWriter, r *http.Request
 	acc, err := h.getAccountByEmail(email)
 	if err != nil {
 		http.Error(w, "account not found", http.StatusForbidden)
+		return
+	}
+	if !h.authorizeAccount(w, r, acc.ID, apikeys.PermReadEmail) {
 		return
 	}
 
@@ -566,6 +864,7 @@ func (h *Handler) HandleMailboxGetMessage(w http.ResponseWriter, r *http.Request
 
 	// Extract CC and BCC from raw headers if available
 	var cc, bcc string
+	metadata := map[string]string{}
 	if msg.StoragePath != "" && h.blobStorage != nil {
 		data, err := h.blobStorage.Get(msg.StoragePath)
 		if err == nil {
@@ -573,6 +872,7 @@ func (h *Handler) HandleMailboxGetMessage(w http.ResponseWriter, r *http.Request
 				cc = mailMsg.Header.Get("Cc")
 				bcc = mailMsg.Header.Get("Bcc")
 			}
+			metadata = spam.HeaderMetadata(data)
 		}
 	}
 
@@ -591,7 +891,41 @@ func (h *Handler) HandleMailboxGetMessage(w http.ResponseWriter, r *http.Request
 		"text":        parsedMsg.Text,
 		"html":        parsedMsg.HTML,
 		"attachments": parsedMsg.Attachments,
+		"metadata": map[string]interface{}{
+			"authentication_results": metadata["Authentication-Results"],
+			"spam_score":             metadata["X-Spam-Score"],
+			"spam_status":            metadata["X-Spam-Status"],
+			"spam_reasons":           metadata["X-Lightr-Spam-Reasons"],
+			"mailed_by":              metadata["X-Lightr-Mailed-By"],
+			"signed_by":              metadata["X-Lightr-Signed-By"],
+			"remote_ip":              metadata["X-Lightr-Remote-IP"],
+			"date_header":            metadata["Date"],
+			"message_id":             firstNonEmpty(metadata["Message-ID"], metadata["Message-Id"]),
+			"return_path":            metadata["Return-Path"],
+			"received_spf":           metadata["Received-SPF"],
+			"dkim_signature":         metadata["DKIM-Signature"],
+			"dnsbl_hits":             metadata["X-Lightr-DNSBL-Hits"],
+			"external_spam_source":   metadata["X-Lightr-External-Spam-Source"],
+			"external_spam_score":    metadata["X-Lightr-External-Spam-Score"],
+			"user_classification":    metadata["X-Lightr-User-Classification"],
+			"reply_to":               metadata["Reply-To"],
+			"sender":                 metadata["Sender"],
+			"arc_seal":               metadata["ARC-Seal"],
+			"arc_message_signature":  metadata["ARC-Message-Signature"],
+			"arc_authentication":     metadata["ARC-Authentication-Results"],
+		},
 	})
+}
+
+func (h *Handler) messageMetadata(msg *domain.Message) map[string]string {
+	if msg == nil || msg.StoragePath == "" || h.blobStorage == nil {
+		return map[string]string{}
+	}
+	data, err := h.blobStorage.Get(msg.StoragePath)
+	if err != nil {
+		return map[string]string{}
+	}
+	return spam.HeaderMetadata(data)
 }
 
 // HandleMailboxFolders returns standard mailbox folders
@@ -607,9 +941,12 @@ func (h *Handler) HandleMailboxFolders(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	if !h.authorizeAccount(w, r, acc.ID, apikeys.PermReadEmail) {
+		return
+	}
 
 	// Get message counts per folder
-	folders := []string{"INBOX", "Sent", "Drafts", "Trash", "Junk"}
+	folders := []string{"INBOX", "Sent", "Drafts", "Trash", "Junk", "Quarantine"}
 	result := make([]map[string]interface{}, len(folders))
 
 	for i, folder := range folders {
@@ -659,6 +996,9 @@ func (h *Handler) HandleMailboxGetAttachment(w http.ResponseWriter, r *http.Requ
 	acc, err := h.getAccountByEmail(email)
 	if err != nil {
 		http.Error(w, "account not found", http.StatusForbidden)
+		return
+	}
+	if !h.authorizeAccount(w, r, acc.ID, apikeys.PermReadEmail) {
 		return
 	}
 
@@ -731,6 +1071,14 @@ func (h *Handler) HandleMailboxSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sender account not found", http.StatusForbidden)
 		return
 	}
+	if !h.authorizeAccount(w, r, acc.ID, apikeys.PermSendEmail) {
+		return
+	}
+	dom, err := h.domainRepo.GetDomainByID(acc.DomainID)
+	if err != nil {
+		http.Error(w, "sender domain not found", http.StatusForbidden)
+		return
+	}
 
 	// Build message - BCC recipients get the email but are not in headers
 	// Handle nil slices safely
@@ -746,6 +1094,7 @@ func (h *Handler) HandleMailboxSend(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	boundary := fmt.Sprintf("----=_Part_%s", uuid.New().String()[:8])
 	msgID := uuid.New().String()
+	mailHost := domain.EffectiveMailHostname(dom, h.serverHostname)
 
 	var msgBuilder strings.Builder
 
@@ -759,14 +1108,9 @@ func (h *Handler) HandleMailboxSend(w http.ResponseWriter, r *http.Request) {
 	msgBuilder.WriteString(fmt.Sprintf("Subject: %s\r\n", req.Subject))
 	msgBuilder.WriteString(fmt.Sprintf("Date: %s\r\n", now.Format(time.RFC1123Z)))
 	msgBuilder.WriteString("MIME-Version: 1.0\r\n")
-
-	// RFC 8058 List-Unsubscribe headers (for bulk/marketing emails)
-	// Only add if this looks like a bulk email (multiple recipients or from a noreply address)
-	fromDomain := strings.Split(req.From, "@")[1]
-	unsubEmail := fmt.Sprintf("unsubscribe@%s", fromDomain)
-	unsubURL := fmt.Sprintf("https://mail.%s/unsubscribe/%s", fromDomain, msgID)
-	msgBuilder.WriteString(fmt.Sprintf("List-Unsubscribe: <mailto:%s?subject=unsubscribe>, <%s>\r\n", unsubEmail, unsubURL))
-	msgBuilder.WriteString("List-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n")
+	msgBuilder.WriteString("User-Agent: Lightr Mailbox API\r\n")
+	msgBuilder.WriteString("X-Mailer: Lightr\r\n")
+	msgBuilder.WriteString(fmt.Sprintf("X-Lightr-Mailed-By: %s\r\n", mailHost))
 
 	if len(req.Attachments) > 0 {
 		msgBuilder.WriteString(fmt.Sprintf("Content-Type: multipart/mixed; boundary=\"%s\"\r\n", boundary))
@@ -833,7 +1177,7 @@ func (h *Handler) HandleMailboxSend(w http.ResponseWriter, r *http.Request) {
 	// Save to database
 	if err := h.messageRepo.CreateMessage(sentMsg); err != nil {
 		// Don't fail the request, just log
-		fmt.Printf("Warning: failed to save sent message: %v\n", err)
+		log.Printf("Warning: failed to save sent message: %v", err)
 	}
 
 	w.WriteHeader(http.StatusAccepted)
@@ -857,6 +1201,9 @@ func (h *Handler) HandleMailboxContacts(w http.ResponseWriter, r *http.Request) 
 	acc, err := h.getAccountByEmail(email)
 	if err != nil {
 		http.Error(w, "account not found", http.StatusForbidden)
+		return
+	}
+	if !h.authorizeAccount(w, r, acc.ID, apikeys.PermReadEmail) {
 		return
 	}
 
@@ -939,8 +1286,9 @@ func (h *Handler) HandleMailboxMarkMessage(w http.ResponseWriter, r *http.Reques
 	}
 
 	var req struct {
-		Email string `json:"email"`
-		Read  bool   `json:"read"`
+		Email  string `json:"email"`
+		Read   bool   `json:"read"`
+		Folder string `json:"folder,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -957,6 +1305,9 @@ func (h *Handler) HandleMailboxMarkMessage(w http.ResponseWriter, r *http.Reques
 	acc, err := h.getAccountByEmail(req.Email)
 	if err != nil {
 		http.Error(w, "account not found", http.StatusForbidden)
+		return
+	}
+	if !h.authorizeAccount(w, r, acc.ID, apikeys.PermManageMailbox) {
 		return
 	}
 
@@ -978,6 +1329,13 @@ func (h *Handler) HandleMailboxMarkMessage(w http.ResponseWriter, r *http.Reques
 	} else {
 		msg.ReadAt = nil
 	}
+	oldFolder := msg.Folder
+	if req.Folder != "" {
+		msg.Folder = req.Folder
+		if err := h.applyMailboxTraining(r.Context(), msg, oldFolder, req.Folder); err != nil {
+			log.Printf("mailbox training failed for %s: %v", msg.ID, err)
+		}
+	}
 
 	if err := h.messageRepo.UpdateMessage(msg); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -988,7 +1346,45 @@ func (h *Handler) HandleMailboxMarkMessage(w http.ResponseWriter, r *http.Reques
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"read":    req.Read,
+		"folder":  msg.Folder,
 	})
+}
+
+func (h *Handler) applyMailboxTraining(ctx context.Context, msg *domain.Message, oldFolder, newFolder string) error {
+	if msg == nil || h.blobStorage == nil || msg.StoragePath == "" {
+		return nil
+	}
+	wasJunk := strings.EqualFold(strings.TrimSpace(oldFolder), "Junk") || strings.EqualFold(strings.TrimSpace(oldFolder), "Spam")
+	isJunk := strings.EqualFold(strings.TrimSpace(newFolder), "Junk") || strings.EqualFold(strings.TrimSpace(newFolder), "Spam")
+	if wasJunk == isJunk {
+		return h.rewriteClassificationHeaders(msg, newFolder)
+	}
+
+	raw, err := h.blobStorage.Get(msg.StoragePath)
+	if err != nil {
+		return err
+	}
+	senderEmail, senderDomain := spam.SenderIdentity(raw, msg.From)
+	if learner, ok := h.messageRepo.(interface {
+		RecordFeedback(ctx context.Context, senderEmail, senderDomain string, isSpam bool) error
+	}); ok {
+		if err := learner.RecordFeedback(ctx, senderEmail, senderDomain, isJunk); err != nil {
+			return err
+		}
+	}
+	return h.rewriteClassificationHeaders(msg, newFolder)
+}
+
+func (h *Handler) rewriteClassificationHeaders(msg *domain.Message, folder string) error {
+	if msg == nil || h.blobStorage == nil || msg.StoragePath == "" {
+		return nil
+	}
+	raw, err := h.blobStorage.Get(msg.StoragePath)
+	if err != nil {
+		return err
+	}
+	updated := spam.ApplyUserClassification(raw, folder)
+	return h.blobStorage.Put(msg.StoragePath, updated)
 }
 
 // HandleUpdateMailboxAccount updates account display name etc
@@ -1008,6 +1404,9 @@ func (h *Handler) HandleUpdateMailboxAccount(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "account not found", http.StatusNotFound)
 		return
 	}
+	if !h.authorizeAccount(w, r, acc.ID, apikeys.PermManageMailbox) {
+		return
+	}
 
 	acc.DisplayName = req.DisplayName
 	acc.UpdatedAt = time.Now()
@@ -1024,166 +1423,112 @@ func (h *Handler) HandleUpdateMailboxAccount(w http.ResponseWriter, r *http.Requ
 	})
 }
 
-// Template handlers
-
-type CreateTemplateRequest struct {
-	OrgID   string `json:"org_id"`
-	Name    string `json:"name"`
-	Subject string `json:"subject"`
-	Content string `json:"content"`
+func (h *Handler) resolveOrgRef(idRef, nameRef string) (uuid.UUID, error) {
+	if idRef != "" {
+		id, err := uuid.Parse(idRef)
+		if err != nil {
+			return uuid.Nil, fmt.Errorf("invalid org_id")
+		}
+		return id, nil
+	}
+	if nameRef == "" {
+		return uuid.Nil, fmt.Errorf("org_id or org is required")
+	}
+	org, err := h.orgRepo.GetOrgByName(nameRef)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("organization not found")
+	}
+	return org.ID, nil
 }
 
-func (h *Handler) HandleCreateTemplate(w http.ResponseWriter, r *http.Request) {
-	var req CreateTemplateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+func (h *Handler) resolveOrgRefOrDefault(idRef, nameRef string) (uuid.UUID, error) {
+	if firstNonEmpty(idRef, nameRef) == "" {
+		org, err := domain.ResolveDefaultOrganization(h.orgRepo)
+		if err != nil {
+			return uuid.Nil, fmt.Errorf("default organization unavailable")
+		}
+		return org.ID, nil
 	}
-
-	orgID, err := uuid.Parse(req.OrgID)
-	if err != nil {
-		http.Error(w, "invalid org_id", http.StatusBadRequest)
-		return
-	}
-
-	tmpl := &domain.Template{
-		ID:      uuid.New(),
-		OrgID:   orgID,
-		Name:    req.Name,
-		Subject: req.Subject,
-		Content: req.Content,
-	}
-
-	if err := h.templateRepo.CreateTemplate(tmpl); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(tmpl)
+	return h.resolveOrgRef(idRef, nameRef)
 }
 
-func (h *Handler) HandleListTemplates(w http.ResponseWriter, r *http.Request) {
-	orgID, err := uuid.Parse(r.PathValue("org_id"))
-	if err != nil {
-		http.Error(w, "invalid org_id", http.StatusBadRequest)
-		return
+func (h *Handler) resolveDomainRef(idRef, nameRef string) (uuid.UUID, error) {
+	if idRef != "" {
+		id, err := uuid.Parse(idRef)
+		if err != nil {
+			return uuid.Nil, fmt.Errorf("invalid domain_id")
+		}
+		return id, nil
 	}
-
-	templates, err := h.templateRepo.ListTemplatesByOrg(orgID)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	if nameRef == "" {
+		return uuid.Nil, fmt.Errorf("domain_id or domain is required")
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(templates)
+	dom, err := h.domainRepo.GetDomainByName(nameRef)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("domain not found")
+	}
+	return dom.ID, nil
 }
 
-func (h *Handler) HandleGetTemplate(w http.ResponseWriter, r *http.Request) {
-	orgID, err := uuid.Parse(r.PathValue("org_id"))
-	if err != nil {
-		http.Error(w, "invalid org_id", http.StatusBadRequest)
-		return
-	}
-	name := r.PathValue("name")
-
-	tmpl, err := h.templateRepo.GetTemplateByName(orgID, name)
-	if err != nil {
-		http.Error(w, "template not found", http.StatusNotFound)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(tmpl)
-}
-
-// Tracking stats
-
-func (h *Handler) HandleGetTrackingStats(w http.ResponseWriter, r *http.Request) {
-	msgID, err := uuid.Parse(r.PathValue("id"))
-	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
-		return
-	}
-
-	events, err := h.trackingRepo.GetTrackingEventsByMessage(msgID)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Aggregate stats
-	stats := struct {
-		Opens  int                     `json:"opens"`
-		Clicks int                     `json:"clicks"`
-		Events []*domain.TrackingEvent `json:"events"`
-	}{
-		Events: events,
-	}
-
-	for _, e := range events {
-		switch e.EventType {
-		case "open":
-			stats.Opens++
-		case "click":
-			stats.Clicks++
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
 		}
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(stats)
+	return ""
 }
 
-// HandleUnsubscribe handles RFC 8058 One-Click Unsubscribe POST requests
-func (h *Handler) HandleUnsubscribe(w http.ResponseWriter, r *http.Request) {
-	msgID := r.PathValue("msg_id")
-
-	// Log the unsubscribe request
-	log.Printf("Unsubscribe request received for message: %s", msgID)
-
-	// In a real implementation, you would:
-	// 1. Look up the message to find the recipient
-	// 2. Add them to an unsubscribe list
-	// 3. Store the unsubscribe event
-
-	// For now, just acknowledge the request (RFC 8058 requires 200 OK)
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Unsubscribed successfully"))
+func (h *Handler) filterVisibleOrganizations(orgs []*domain.Organization) []*domain.Organization {
+	filtered := make([]*domain.Organization, 0, len(orgs))
+	for _, org := range orgs {
+		if org != nil && !domain.IsDefaultOrganizationName(org.Name) {
+			filtered = append(filtered, org)
+		}
+	}
+	return filtered
 }
 
-// HandleUnsubscribePage shows a confirmation page for GET requests
-func (h *Handler) HandleUnsubscribePage(w http.ResponseWriter, r *http.Request) {
-	msgID := r.PathValue("msg_id")
+func (h *Handler) listAllDomains() ([]*domain.Domain, error) {
+	orgs, err := h.orgRepo.ListOrgs()
+	if err != nil {
+		return nil, err
+	}
+	var domains []*domain.Domain
+	for _, org := range orgs {
+		items, err := h.domainRepo.ListDomainsByOrg(org.ID)
+		if err != nil {
+			return nil, err
+		}
+		domains = append(domains, items...)
+	}
+	return domains, nil
+}
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	html := fmt.Sprintf(`<!DOCTYPE html>
-<html>
-<head>
-    <title>Unsubscribe</title>
-    <style>
-        body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; text-align: center; }
-        h1 { color: #333; }
-        .btn { background: #dc3545; color: white; padding: 15px 30px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }
-        .btn:hover { background: #c82333; }
-        .success { color: #28a745; display: none; }
-    </style>
-</head>
-<body>
-    <h1>Unsubscribe</h1>
-    <p>Click the button below to unsubscribe from future emails.</p>
-    <form method="POST" action="/unsubscribe/%s" onsubmit="document.getElementById('success').style.display='block'; document.getElementById('form').style.display='none'; return true;">
-        <div id="form">
-            <button type="submit" class="btn">Unsubscribe</button>
-        </div>
-    </form>
-    <div id="success" class="success">
-        <h2>✓ You have been unsubscribed</h2>
-        <p>You will no longer receive these emails.</p>
-    </div>
-</body>
-</html>`, msgID)
-
-	w.Write([]byte(html))
+func (h *Handler) listAccessibleDomains(key *apikeys.APIKey) ([]*domain.Domain, error) {
+	if key == nil || hasGlobalAccess(key) {
+		return h.listAllDomains()
+	}
+	if accountID := keyAccountID(key); accountID != nil {
+		acc, err := h.accountRepo.GetAccountByID(*accountID)
+		if err != nil {
+			return nil, err
+		}
+		dom, err := h.domainRepo.GetDomainByID(acc.DomainID)
+		if err != nil {
+			return nil, err
+		}
+		return []*domain.Domain{dom}, nil
+	}
+	if key.DomainID != nil {
+		dom, err := h.domainRepo.GetDomainByID(*key.DomainID)
+		if err != nil {
+			return nil, err
+		}
+		return []*domain.Domain{dom}, nil
+	}
+	if key.OrganizationID != nil {
+		return h.domainRepo.ListDomainsByOrg(*key.OrganizationID)
+	}
+	return []*domain.Domain{}, nil
 }

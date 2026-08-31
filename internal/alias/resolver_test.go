@@ -94,6 +94,7 @@ func TestAliasType_Values(t *testing.T) {
 		{AliasTypeForward, "forward"},
 		{AliasTypeCatchAll, "catchall"},
 		{AliasTypeRegex, "regex"},
+		{AliasTypeBridge, "bridge"},
 	}
 
 	for _, tt := range tests {
@@ -189,4 +190,9 @@ func (m *mockDomainStore) GetDomainByID(id uuid.UUID) (*domain.Domain, error) {
 
 func (m *mockDomainStore) ListDomainsByOrg(orgID uuid.UUID) ([]*domain.Domain, error) {
 	return nil, nil
+}
+
+func (m *mockDomainStore) UpdateDomain(d *domain.Domain) error {
+	m.domains[d.Name] = d
+	return nil
 }

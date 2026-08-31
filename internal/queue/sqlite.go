@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -11,12 +13,23 @@ import (
 
 // SQLiteRepository implements Repository using SQLite
 type SQLiteRepository struct {
-	db *sql.DB
+	db     *sql.DB
+	driver string
 }
 
 // NewSQLiteRepository creates a new SQLite-based queue repository
 func NewSQLiteRepository(db *sql.DB) (*SQLiteRepository, error) {
-	repo := &SQLiteRepository{db: db}
+	return NewSQLRepository(db, "sqlite")
+}
+
+// NewPostgresRepository creates a new Postgres-backed queue repository.
+func NewPostgresRepository(db *sql.DB) (*SQLiteRepository, error) {
+	return NewSQLRepository(db, "postgres")
+}
+
+// NewSQLRepository creates a queue repository for the given SQL dialect.
+func NewSQLRepository(db *sql.DB, driver string) (*SQLiteRepository, error) {
+	repo := &SQLiteRepository{db: db, driver: driver}
 	if err := repo.migrate(); err != nil {
 		return nil, err
 	}
@@ -54,12 +67,12 @@ func (r *SQLiteRepository) migrate() error {
 
 func (r *SQLiteRepository) Create(msg *QueuedMessage) error {
 	toJSON, _ := json.Marshal(msg.To)
-	_, err := r.db.Exec(`
+	_, err := r.db.Exec(r.bind(`
 		INSERT INTO email_queue (
 			id, org_id, domain_id, from_addr, to_addrs, subject, body, html_body,
 			headers, status, attempts, max_attempts, next_retry, created_at, updated_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
+	`),
 		msg.ID.String(),
 		msg.OrgID.String(),
 		msg.DomainID.String(),
@@ -80,15 +93,15 @@ func (r *SQLiteRepository) Create(msg *QueuedMessage) error {
 }
 
 func (r *SQLiteRepository) GetPending(ctx context.Context, limit int) ([]*QueuedMessage, error) {
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.db.QueryContext(ctx, r.bind(fmt.Sprintf(`
 		SELECT id, org_id, domain_id, from_addr, to_addrs, subject, body, html_body,
 		       headers, status, attempts, max_attempts, last_error, next_retry,
 		       created_at, updated_at, delivered_at
 		FROM email_queue
-		WHERE (status = 'pending' OR (status = 'retrying' AND next_retry <= datetime('now')))
+		WHERE (status = 'pending' OR (status = 'retrying' AND next_retry <= %s))
 		ORDER BY next_retry ASC
 		LIMIT ?
-	`, limit)
+	`, r.nowExpr())), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +113,7 @@ func (r *SQLiteRepository) GetPending(ctx context.Context, limit int) ([]*Queued
 func (r *SQLiteRepository) UpdateStatus(id uuid.UUID, status Status, lastError string, nextRetry *time.Time) error {
 	query := `
 		UPDATE email_queue
-		SET status = ?, last_error = ?, updated_at = datetime('now'), attempts = attempts + 1
+		SET status = ?, last_error = ?, updated_at = ` + r.nowExpr() + `, attempts = attempts + 1
 	`
 	args := []interface{}{string(status), lastError}
 
@@ -112,27 +125,27 @@ func (r *SQLiteRepository) UpdateStatus(id uuid.UUID, status Status, lastError s
 	query += " WHERE id = ?"
 	args = append(args, id.String())
 
-	_, err := r.db.Exec(query, args...)
+	_, err := r.db.Exec(r.bind(query), args...)
 	return err
 }
 
 func (r *SQLiteRepository) MarkDelivered(id uuid.UUID) error {
-	_, err := r.db.Exec(`
+	_, err := r.db.Exec(r.bind(`
 		UPDATE email_queue
-		SET status = 'delivered', delivered_at = datetime('now'), updated_at = datetime('now')
+		SET status = 'delivered', delivered_at = `+r.nowExpr()+`, updated_at = `+r.nowExpr()+`
 		WHERE id = ?
-	`, id.String())
+	`), id.String())
 	return err
 }
 
 func (r *SQLiteRepository) GetByID(id uuid.UUID) (*QueuedMessage, error) {
-	row := r.db.QueryRow(`
+	row := r.db.QueryRow(r.bind(`
 		SELECT id, org_id, domain_id, from_addr, to_addrs, subject, body, html_body,
 		       headers, status, attempts, max_attempts, last_error, next_retry,
 		       created_at, updated_at, delivered_at
 		FROM email_queue
 		WHERE id = ?
-	`, id.String())
+	`), id.String())
 
 	msg, err := r.scanMessage(row)
 	if err == sql.ErrNoRows {
@@ -159,7 +172,7 @@ func (r *SQLiteRepository) ListByOrg(orgID uuid.UUID, status *Status, limit int)
 	query += " ORDER BY created_at DESC LIMIT ?"
 	args = append(args, limit)
 
-	rows, err := r.db.Query(query, args...)
+	rows, err := r.db.Query(r.bind(query), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -170,15 +183,39 @@ func (r *SQLiteRepository) ListByOrg(orgID uuid.UUID, status *Status, limit int)
 
 func (r *SQLiteRepository) DeleteOld(olderThan time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-olderThan)
-	result, err := r.db.Exec(`
+	result, err := r.db.Exec(r.bind(`
 		DELETE FROM email_queue
 		WHERE (status = 'delivered' OR status = 'failed')
 		AND updated_at < ?
-	`, cutoff)
+	`), cutoff)
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+func (r *SQLiteRepository) bind(query string) string {
+	if r.driver != "postgres" {
+		return query
+	}
+	var b strings.Builder
+	arg := 1
+	for i := 0; i < len(query); i++ {
+		if query[i] == '?' {
+			b.WriteString(fmt.Sprintf("$%d", arg))
+			arg++
+			continue
+		}
+		b.WriteByte(query[i])
+	}
+	return b.String()
+}
+
+func (r *SQLiteRepository) nowExpr() string {
+	if r.driver == "postgres" {
+		return "CURRENT_TIMESTAMP"
+	}
+	return "CURRENT_TIMESTAMP"
 }
 
 func (r *SQLiteRepository) scanMessage(row *sql.Row) (*QueuedMessage, error) {

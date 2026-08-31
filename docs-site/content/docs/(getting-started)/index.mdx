@@ -1,0 +1,52 @@
+---
+title: Overview
+description: Understand what Lightr owns, where to start, and which docs page answers which operator question.
+---
+
+## What Lightr is
+
+Lightr is a mail engine and operator surface for teams that want to run branded
+email on infrastructure they already control.
+
+It owns:
+
+- SMTP receive, SMTP submission, outbound relay, and DKIM signing
+- IMAP mailbox access
+- domains, accounts, aliases, queueing, storage, and operator APIs
+- DNS and mail-identity guidance for operators
+- webhooks, API keys, permissions, health checks, and logs
+
+It does not try to be:
+
+- a campaign or marketing product
+- a template renderer
+- an unsubscribe or preference-center app
+- a groupware suite
+
+## Use the docs in this order
+
+1. Open [Install](/docs/install) when you need the binary, service unit, and config paths on a machine.
+2. Open [Quickstart](/docs/quickstart) when Lightr is installed and you want the runtime itself healthy.
+3. Open [First Domain & Mailbox](/docs/first-domain) when the host is ready and you want the first real inbox and DNS flow working.
+4. Move into [Configuration](/docs/configuration), [Domains & DNS](/docs/domains-dns), and [Health & Logs](/docs/health-logs) as the install becomes more production-shaped.
+5. Use [API](/docs/api) once you want repeatable provisioning instead of manual CLI-only work.
+
+## Pick the page by the question you have
+
+- "How do I get Lightr onto a server?" -> [Install](/docs/install)
+- "How do I know the runtime is up correctly?" -> [Quickstart](/docs/quickstart)
+- "How do I create support@mydomain.com and make replies work?" -> [First Domain & Mailbox](/docs/first-domain)
+- "What DNS records do I actually need?" -> [Domains & DNS](/docs/domains-dns)
+- "How do I inspect logs, health, and the queue?" -> [Health & Logs](/docs/health-logs)
+- "How do I automate this from another app?" -> [API](/docs/api)
+
+## Core operator model
+
+Keep these names separate:
+
+- `server.hostname`: the node-wide runtime identity
+- `domain.mail_hostname`: the public mail host for a managed domain
+- mailbox domain: the address space people actually use, such as `your-domain.com`
+
+In small installs they may align, but the docs treat them as separate on purpose
+because the operator model eventually depends on that distinction.

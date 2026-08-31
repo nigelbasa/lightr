@@ -1,0 +1,11 @@
+{
+  "title": "Getting Started",
+  "root": true,
+  "defaultOpen": true,
+  "pages": [
+    "index",
+    "install",
+    "quickstart",
+    "first-domain"
+  ]
+}

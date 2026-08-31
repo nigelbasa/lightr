@@ -1,6 +1,6 @@
 [Unit]
 Description=Lightr Lightweight Email Server
-Documentation=https://github.com/yourusername/lightr
+Documentation=https://github.com/nigelbasa/lightr
 After=network.target
 
 [Service]

@@ -8,7 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/nigelbasa/lightr/internal/domain"
-	"github.com/nigelbasa/lightr/internal/webhook"
+	"github.com/nigelbasa/lightr/internal/webhooks"
 )
 
 // Handler processes incoming bounce emails
@@ -16,11 +16,11 @@ type Handler struct {
 	parser     *Parser
 	repo       *SQLiteRepository
 	domainRepo domain.DomainRepository
-	webhookSvc *webhook.Service
+	webhookSvc *webhooks.WebhookService
 }
 
 // NewHandler creates a new bounce handler
-func NewHandler(repo *SQLiteRepository, domainRepo domain.DomainRepository, webhookSvc *webhook.Service) *Handler {
+func NewHandler(repo *SQLiteRepository, domainRepo domain.DomainRepository, webhookSvc *webhooks.WebhookService) *Handler {
 	return &Handler{
 		parser:     NewParser(),
 		repo:       repo,
@@ -68,17 +68,20 @@ func (h *Handler) Process(ctx context.Context, domainID uuid.UUID, emailData []b
 
 	log.Printf("Processed %s bounce for %s: %s", info.Type, info.OriginalTo, info.DiagnosticCode)
 
-	// Trigger webhook if configured
-	if dom.WebhookURL != "" && h.webhookSvc != nil {
-		eventType := webhook.EventType("email.bounced")
-		h.webhookSvc.Trigger(ctx, dom.WebhookURL, eventType, map[string]interface{}{
+	// Fire bounce event through the unified webhook system.
+	if h.webhookSvc != nil {
+		payload := map[string]interface{}{
 			"bounce_id":       record.ID.String(),
 			"bounce_type":     string(info.Type),
 			"recipient":       info.OriginalTo,
 			"diagnostic_code": info.DiagnosticCode,
 			"original_msg_id": info.OriginalMsgID,
 			"remote_mta":      info.RemoteMTA,
-		})
+		}
+		h.webhookSvc.Trigger(ctx, webhooks.EventEmailBounced, payload)
+		if dom.WebhookURL != "" {
+			h.webhookSvc.DeliverOnce(ctx, dom.WebhookURL, webhooks.EventEmailBounced, payload)
+		}
 	}
 
 	return true, nil

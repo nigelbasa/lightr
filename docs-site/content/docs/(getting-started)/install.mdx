@@ -1,0 +1,114 @@
+---
+title: Install
+description: Put Lightr on a machine, understand what the installer creates, and choose the right install path before first start.
+---
+
+This page is only about getting Lightr onto a machine.
+
+It does **not** cover creating domains, mailboxes, or DNS records. Once the
+binary and config are in place, move to [Quickstart](/docs/quickstart).
+
+## Linux installer
+
+Use the Linux installer when you want the fastest systemd-based path.
+
+```bash title="Fastest install path"
+curl -fsSL https://lightr.nigelbasa.tech/install.sh | sudo bash -s -- example.com
+```
+
+```bash title="Inspect the installer first"
+curl -fsSL https://lightr.nigelbasa.tech/install.sh -o install.sh
+less install.sh
+bash install.sh --help
+```
+
+```bash title="Explicit domain, hostname, and immediate start"
+curl -fsSL https://lightr.nigelbasa.tech/install.sh | sudo bash -s -- \
+  --domain example.com \
+  --hostname mail.example.com \
+  --mail-hostname mail.example.com \
+  --start
+```
+
+The installer:
+
+- downloads the latest Linux release binary
+- creates the `lightr` service account and group
+- writes a systemd unit
+- creates config, data, and log directories
+- runs `lightr init` unless you ask it to skip init
+
+## What the installer leaves behind
+
+- Binary: `/usr/local/bin/lightr`
+- Config: `/etc/lightr/config.yaml`
+- Data: `/var/lib/lightr`
+- Logs: `/var/log/lightr`
+- Systemd unit: `/etc/systemd/system/lightr.service`
+
+Useful installer flags:
+
+- `--start`: start the service after install
+- `--skip-init`: install the binary and unit but skip config generation
+- `--force-init`: overwrite an existing generated config
+- `--no-enable`: install without enabling the service
+
+## Debian or Ubuntu package
+
+Use this when you want a package-oriented Linux flow instead of the curl pipe.
+
+```bash title="Package install"
+wget https://github.com/nigelbasa/lightr/releases/download/v0.1.0/lightr_0.1.0_amd64.deb
+sudo dpkg -i lightr_0.1.0_amd64.deb
+sudo lightr init --hostname mail.example.com
+sudo chown -R lightr:lightr /var/lib/lightr
+sudo chown root:lightr /etc/lightr/config.yaml
+sudo chmod 640 /etc/lightr/config.yaml
+sudo systemctl start lightr
+sudo systemctl enable lightr
+```
+
+## Windows binary
+
+Use this for local evaluation, Windows tooling workflows, or basic runtime
+validation.
+
+```powershell title="Download latest Windows binary"
+Invoke-WebRequest -Uri https://github.com/nigelbasa/lightr/releases/latest/download/lightr-windows-amd64.exe -OutFile lightr.exe
+.\lightr.exe version
+```
+
+## Docker
+
+Use Docker when packaging convenience matters more than an opinionated host
+integration. You still own persistence, TLS, DNS, and public identity outside
+the container.
+
+```bash title="Container image"
+docker pull ghcr.io/nigelbasa/lightr:latest
+docker run \
+  -p 8080:8080 \
+  -p 2525:2525 \
+  -p 1143:1143 \
+  -v lightr-data:/app/data \
+  ghcr.io/nigelbasa/lightr:latest
+```
+
+## Build from source
+
+Use this when you are contributing, auditing the runtime closely, or baking
+Lightr into a custom build pipeline.
+
+```bash title="Build from source"
+git clone https://github.com/nigelbasa/lightr.git
+cd lightr
+go build -o lightr ./cmd/lightr
+./lightr init
+./lightr serve
+```
+
+## Next step
+
+When Lightr is installed and you know where the config lives, move to
+[Quickstart](/docs/quickstart) to validate the runtime itself before you create
+the first domain.

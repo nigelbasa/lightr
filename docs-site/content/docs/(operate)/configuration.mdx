@@ -1,0 +1,119 @@
+---
+title: Configuration
+description: Choose a profile, understand which settings are node-wide versus domain-owned, and validate the runtime before exposure.
+---
+
+## Choose a profile first
+
+Lightr supports more than one deployment shape. Pick the storage profile before
+you overthink the rest of the file.
+
+- SQLite: best default for single-node installs and the lowest operational overhead
+- PostgreSQL: better when you want managed database infrastructure, external backups, or easier failover planning
+
+Generate a production-shaped sample directly:
+
+```bash title="Generate a production sample"
+lightr config sample --profile sqlite --prod --output /etc/lightr/config.yaml
+lightr config sample --profile postgres --prod --output /etc/lightr/config.yaml
+```
+
+## Recommended file locations
+
+- Config: `/etc/lightr/config.yaml`
+- Data: `/var/lib/lightr`
+- Logs: `/var/log/lightr/lightr.log`
+
+Local evaluation can start with `./lightr.yaml` and `./data`, but service
+installs are easier to reason about when config, state, and logs are separated.
+
+## Know which settings are global and which belong to a domain
+
+Node-wide runtime settings:
+
+- `server.hostname`
+- `http.addr`
+- `smtp.addr`
+- `imap.addr`
+- `database.*`
+- fallback `tls.cert_file` and `tls.key_file`
+
+Domain-owned settings and state:
+
+- mailbox domain names such as `example.com`
+- `domain.mail_hostname`
+- generated DNS records
+- DKIM material attached to domains
+- domain verification state
+
+That split matters because one machine can eventually serve more than one mail
+domain even if your first install is small.
+
+## Minimal production-shaped config
+
+```yaml title="/etc/lightr/config.yaml"
+data_dir: /var/lib/lightr
+
+server:
+  hostname: mail.your-domain.com
+  bind_address: 0.0.0.0
+
+database:
+  driver: sqlite
+  path: /var/lib/lightr/lightr.db
+
+http:
+  addr: ":8080"
+
+api:
+  admin_key: "CHANGE_ME_generate_a_random_key"
+
+smtp:
+  addr: ":25"
+  submission_addr: ":587"
+  domain: mail.your-domain.com
+  max_message_bytes: 26214400
+  max_recipients: 100
+  allow_insecure: false
+
+imap:
+  addr: ":143"
+  tls_addr: ":993"
+  allow_insecure: false
+
+dkim:
+  selector: default
+  key_bits: 2048
+
+security:
+  require_tls_for_auth: true
+
+logging:
+  level: info
+  file: /var/log/lightr/lightr.log
+```
+
+## Config review commands
+
+```bash title="Inspect and validate config"
+lightr config show
+lightr config validate
+```
+
+Use `config validate` as the gate before you restart the service or open ports
+publicly.
+
+## Common config decisions
+
+- Keep `allow_insecure` off for real traffic.
+- Replace the bootstrap API key before exposing the API outside the box.
+- Keep the runtime hostname, TLS subject, and public mail host aligned.
+- Move onto standard ports only after the service user, firewall, and provider rules are ready.
+
+## Before exposure
+
+- `config validate` passes
+- TLS files are readable by the runtime
+- database path or DSN is correct
+- `logging.file` points somewhere persistent
+- host ports and firewall rules match the config you wrote

@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  VERSION_PKG: github.com/nigelbasa/lightr/cmd/lightr
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run unit tests
+        env:
+          CGO_ENABLED: 0
+        run: go test ./...
+
+      - name: Run go vet
+        env:
+          CGO_ENABLED: 0
+        run: go vet ./...
+
+      - name: Verify installer shell syntax
+        if: runner.os == 'Linux'
+        run: bash -n quickstart.sh
+
+  race:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install race detector toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Run race tests
+        env:
+          CGO_ENABLED: 1
+        run: go test -race ./...
+
+  race-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install MinGW toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+          path-type: inherit
+
+      - name: Run Windows race tests
+        shell: msys2 {0}
+        env:
+          CGO_ENABLED: 1
+          CC: gcc
+          CXX: g++
+        run: go test -race ./...
+
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            output: lightr-linux-amd64
+          - goos: linux
+            goarch: arm64
+            output: lightr-linux-arm64
+          - goos: windows
+            goarch: amd64
+            output: lightr-windows-amd64.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Verify cross-platform build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          go build -ldflags="-s -w -X ${{ env.VERSION_PKG }}.version=ci" -o dist/${{ matrix.output }} ./cmd/lightr

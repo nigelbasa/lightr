@@ -11,6 +11,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"mime/quotedprintable"
+	"net"
 	"net/mail"
 	"strings"
 	"sync"
@@ -32,11 +33,24 @@ var globalIdleNotifier = &IdleNotifier{
 	sessions: make(map[uuid.UUID][]chan uint32),
 }
 
-// RegisterIdle registers an IDLE session for notifications
+// RegisterIdle registers an IDLE session for notifications.
+// Deprecated: use tryRegister which enforces per-account caps.
 func (n *IdleNotifier) RegisterIdle(accountID uuid.UUID, ch chan uint32) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.sessions[accountID] = append(n.sessions[accountID], ch)
+}
+
+// tryRegister registers an IDLE session if the account is below the cap.
+// Returns false if the cap is exceeded; the caller should refuse the IDLE.
+func (n *IdleNotifier) tryRegister(accountID uuid.UUID, ch chan uint32, cap int) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if cap > 0 && len(n.sessions[accountID]) >= cap {
+		return false
+	}
+	n.sessions[accountID] = append(n.sessions[accountID], ch)
+	return true
 }
 
 // UnregisterIdle removes an IDLE session
@@ -77,6 +91,25 @@ type Backend struct {
 	MessageRepo domain.MessageRepository
 	BlobStorage domain.BlobStorage
 	AuthService domain.AuthService
+
+	// MaxAppendBytes caps the size of a single APPEND literal. Zero means
+	// no limit; populate from the same config knob as SMTP.MaxMessageBytes
+	// so client-driven uploads can't exceed inbound mail limits.
+	MaxAppendBytes int64
+
+	// MaxIdlePerAccount caps the number of concurrent IDLE sessions a single
+	// account can hold. Zero means no limit. Default 5 is sensible — one
+	// per device.
+	MaxIdlePerAccount int
+
+	// IPLimiter, if set, throttles login attempts per remote IP.
+	IPLimiter LoginThrottle
+}
+
+// LoginThrottle is satisfied by *ratelimit.IPLimiter; declared as a local
+// interface to avoid a hard dependency from the imap package.
+type LoginThrottle interface {
+	AllowIMAPLogin(ip string) bool
 }
 
 // NewSession creates a new IMAP session for an incoming connection
@@ -103,6 +136,11 @@ func (s *Session) Close() error {
 }
 
 func (s *Session) Login(username, password string) error {
+	if s.backend.IPLimiter != nil {
+		if ip := s.remoteIP(); ip != "" && !s.backend.IPLimiter.AllowIMAPLogin(ip) {
+			return imapserver.ErrAuthFailed
+		}
+	}
 	acc, err := s.backend.AuthService.Authenticate(context.Background(), username, password)
 	if err != nil {
 		return imapserver.ErrAuthFailed
@@ -110,6 +148,22 @@ func (s *Session) Login(username, password string) error {
 	s.account = acc
 	s.domainID = acc.DomainID
 	return nil
+}
+
+// remoteIP returns the dialing client's IP, or "" if the connection is gone.
+func (s *Session) remoteIP() string {
+	if s.conn == nil {
+		return ""
+	}
+	nc := s.conn.NetConn()
+	if nc == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(nc.RemoteAddr().String())
+	if err != nil {
+		return nc.RemoteAddr().String()
+	}
+	return host
 }
 
 func (s *Session) Select(mailbox string, options *imap.SelectOptions) (*imap.SelectData, error) {
@@ -164,7 +218,7 @@ func (s *Session) Unsubscribe(mailbox string) error {
 
 func (s *Session) List(w *imapserver.ListWriter, ref string, patterns []string, options *imap.ListOptions) error {
 	// Standard mailboxes
-	mailboxes := []string{"INBOX", "Sent", "Drafts", "Trash", "Junk"}
+	mailboxes := []string{"INBOX", "Sent", "Drafts", "Trash", "Junk", "Quarantine"}
 
 	for _, mb := range mailboxes {
 		match := false
@@ -185,6 +239,28 @@ func (s *Session) List(w *imapserver.ListWriter, ref string, patterns []string, 
 		if err := w.WriteList(data); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// validateMailboxName rejects mailbox names that could escape the per-account
+// blob directory. IMAP allows arbitrary names, but lightr maps them onto a
+// filesystem path, so any path separator or traversal segment is unsafe.
+func validateMailboxName(name string) error {
+	if name == "" {
+		return fmt.Errorf("mailbox name is required")
+	}
+	if len(name) > 255 {
+		return fmt.Errorf("mailbox name too long")
+	}
+	if strings.ContainsAny(name, "/\\\x00") {
+		return fmt.Errorf("invalid character in mailbox name")
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("invalid mailbox name")
+	}
+	if strings.TrimSpace(name) != name {
+		return fmt.Errorf("mailbox name has leading or trailing whitespace")
 	}
 	return nil
 }
@@ -241,6 +317,12 @@ func (s *Session) Append(mailbox string, r imap.LiteralReader, options *imap.App
 	if s.account == nil {
 		return nil, fmt.Errorf("not authenticated")
 	}
+	if err := validateMailboxName(mailbox); err != nil {
+		return nil, err
+	}
+	if s.backend.MaxAppendBytes > 0 && r.Size() > s.backend.MaxAppendBytes {
+		return nil, fmt.Errorf("message too large: %d bytes (limit %d)", r.Size(), s.backend.MaxAppendBytes)
+	}
 
 	// Read the message content
 	data := make([]byte, r.Size())
@@ -286,11 +368,15 @@ func (s *Session) Idle(w *imapserver.UpdateWriter, stop <-chan struct{}) error {
 		return fmt.Errorf("not authenticated")
 	}
 
-	log.Printf("IDLE: client started IDLE for account %s", s.account.ID)
-
-	// Create notification channel
+	cap := s.backend.MaxIdlePerAccount
+	if cap == 0 {
+		cap = 5
+	}
 	notifyCh := make(chan uint32, 10)
-	globalIdleNotifier.RegisterIdle(s.account.ID, notifyCh)
+	if !globalIdleNotifier.tryRegister(s.account.ID, notifyCh, cap) {
+		return fmt.Errorf("too many concurrent IDLE sessions for this account")
+	}
+	log.Printf("IDLE: client started IDLE for account %s", s.account.ID)
 	defer func() {
 		globalIdleNotifier.UnregisterIdle(s.account.ID, notifyCh)
 		log.Printf("IDLE: client ended IDLE for account %s", s.account.ID)
@@ -1266,10 +1352,11 @@ func extractMessagePartHeaders(data []byte, partPath []int) []byte {
 
 // Server wraps the IMAP server
 type Server struct {
-	addr      string
-	tlsAddr   string
-	backend   *Backend
-	tlsConfig *tls.Config
+	addr              string
+	tlsAddr           string
+	backend           *Backend
+	tlsConfig         *tls.Config
+	allowInsecureAuth bool
 }
 
 // NewServer creates a new IMAP server
@@ -1283,6 +1370,11 @@ func NewServer(addr string, backend *Backend) *Server {
 // WithTLSAddr sets the implicit TLS port (993)
 func (s *Server) WithTLSAddr(addr string) {
 	s.tlsAddr = addr
+}
+
+// WithAllowInsecureAuth controls whether IMAP LOGIN is permitted without TLS.
+func (s *Server) WithAllowInsecureAuth(allow bool) {
+	s.allowInsecureAuth = allow
 }
 
 // WithTLS configures TLS support for IMAPS
@@ -1331,8 +1423,12 @@ func (s *Server) Start() error {
 		opts.InsecureAuth = false
 		log.Printf("Starting IMAP server at %s with STARTTLS", s.addr)
 	} else {
-		opts.InsecureAuth = true
-		log.Printf("Starting IMAP server at %s (insecure)", s.addr)
+		opts.InsecureAuth = s.allowInsecureAuth
+		if s.allowInsecureAuth {
+			log.Printf("Starting IMAP server at %s (insecure auth enabled)", s.addr)
+		} else {
+			log.Printf("Starting IMAP server at %s without IMAP LOGIN until TLS is configured", s.addr)
+		}
 	}
 
 	srv := imapserver.New(opts)

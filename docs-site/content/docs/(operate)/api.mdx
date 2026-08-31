@@ -1,0 +1,202 @@
+---
+title: API
+description: "Work through the API in stages: authenticate, create scope, provision domains and accounts, then operate mailbox, send, and automation flows."
+---
+
+## 1. Authenticate and validate the runtime
+
+```bash title="Base auth pattern"
+export LIGHTR_API=http://127.0.0.1:8080
+export LIGHTR_ADMIN_KEY=replace-me
+
+curl "$LIGHTR_API/health"
+
+curl "$LIGHTR_API/v1/orgs" \
+  -H "Authorization: Bearer $LIGHTR_ADMIN_KEY"
+```
+
+- `GET /health` is unauthenticated.
+- All `/v1/*` endpoints expect `Authorization: Bearer ...`.
+- Scope matters: global keys, org keys, domain keys, and account keys do not see the same surface.
+
+## 2. Create organizations and scoped API keys
+
+```bash title="Organizations and API keys"
+curl "$LIGHTR_API/v1/orgs?include_default=true" \
+  -H "Authorization: Bearer $LIGHTR_ADMIN_KEY"
+
+curl -X POST "$LIGHTR_API/v1/orgs" \
+  -H "Authorization: Bearer $LIGHTR_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Acme Mail"}'
+
+curl -X POST "$LIGHTR_API/v1/apikeys" \
+  -H "Authorization: Bearer $LIGHTR_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"integration-key","type":"integration","org":"Acme Mail","expires_in":"30d"}'
+```
+
+Endpoints in this stage:
+
+- `GET /v1/orgs`
+- `POST /v1/orgs`
+- `GET /v1/orgs/{id}`
+- `GET /v1/apikeys`
+- `POST /v1/apikeys`
+- `POST /v1/apikeys/{id}/rotate`
+- `POST /v1/apikeys/{id}/revoke`
+- `DELETE /v1/apikeys/{id}`
+
+## 3. Provision and verify domains
+
+```bash title="Create and verify a domain"
+curl -X POST "$LIGHTR_API/v1/domains" \
+  -H "Authorization: Bearer $LIGHTR_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"your-domain.com","mail_hostname":"mail.your-domain.com","spam_policy":"junk"}'
+
+curl "$LIGHTR_API/v1/domains" \
+  -H "Authorization: Bearer $LIGHTR_ADMIN_KEY"
+
+curl "$LIGHTR_API/v1/domains/{domain_id}/dns" \
+  -H "Authorization: Bearer $LIGHTR_ADMIN_KEY"
+
+curl -X POST "$LIGHTR_API/v1/domains/{domain_id}/verify" \
+  -H "Authorization: Bearer $LIGHTR_ADMIN_KEY"
+```
+
+Endpoints in this stage:
+
+- `GET /v1/domains`
+- `GET /v1/orgs/{org_id}/domains`
+- `POST /v1/domains`
+- `GET /v1/domains/{id}`
+- `PATCH /v1/domains/{id}`
+- `DELETE /v1/domains/{id}`
+- `GET /v1/domains/{id}/dns`
+- `POST /v1/domains/{id}/verify`
+- `POST /v1/domains/{id}/auth-webhook/verify`
+- `POST /v1/domains/{id}/auth-webhook/rotate-secret`
+
+## 4. Create accounts and aliases
+
+```bash title="Accounts and aliases"
+curl -X POST "$LIGHTR_API/v1/accounts" \
+  -H "Authorization: Bearer $LIGHTR_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"domain":"your-domain.com","email":"ops@your-domain.com","auth_mode":"native","password":"change-me","quota_bytes":1073741824}'
+
+curl "$LIGHTR_API/v1/accounts?domain=your-domain.com" \
+  -H "Authorization: Bearer $LIGHTR_ADMIN_KEY"
+
+curl -X POST "$LIGHTR_API/v1/aliases" \
+  -H "Authorization: Bearer $LIGHTR_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"domain":"your-domain.com","source":"hello","destinations":["ops@your-domain.com"],"type":"forward"}'
+```
+
+Endpoints in this stage:
+
+- `GET /v1/accounts`
+- `POST /v1/accounts`
+- `GET /v1/accounts/{id}`
+- `PATCH /v1/accounts/{id}`
+- `DELETE /v1/accounts/{id}`
+- `GET /v1/aliases`
+- `POST /v1/aliases`
+- `PATCH /v1/aliases/{id}`
+- `DELETE /v1/aliases/{id}`
+
+## 5. Read and manage mailbox state
+
+```bash title="Mailbox operations"
+curl "$LIGHTR_API/v1/mailbox?email=ops@your-domain.com" \
+  -H "Authorization: Bearer $LIGHTR_ADMIN_KEY"
+
+curl "$LIGHTR_API/v1/mailbox/messages?email=ops@your-domain.com&folder=INBOX" \
+  -H "Authorization: Bearer $LIGHTR_ADMIN_KEY"
+
+curl "$LIGHTR_API/v1/mailbox/messages/{message_id}?email=ops@your-domain.com" \
+  -H "Authorization: Bearer $LIGHTR_ADMIN_KEY"
+
+curl -X PATCH "$LIGHTR_API/v1/mailbox/messages/{message_id}" \
+  -H "Authorization: Bearer $LIGHTR_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"email":"ops@your-domain.com","read":true,"folder":"Archive"}'
+
+curl -X POST "$LIGHTR_API/v1/mailbox/send" \
+  -H "Authorization: Bearer $LIGHTR_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "from": "ops@your-domain.com",
+    "to": ["friend@example.net"],
+    "subject": "Hello",
+    "text": "Message from mailbox API."
+  }'
+```
+
+Endpoints in this stage:
+
+- `GET /v1/mailbox`
+- `GET /v1/mailbox/messages`
+- `GET /v1/mailbox/messages/{id}`
+- `PATCH /v1/mailbox/messages/{id}`
+- `GET /v1/mailbox/messages/{id}/attachments/{att_id}`
+- `GET /v1/mailbox/folders`
+- `POST /v1/mailbox/send`
+- `GET /v1/mailbox/contacts`
+- `PATCH /v1/mailbox/account`
+- `GET /v1/accounts/{account_id}/messages`
+- `GET /v1/messages/{id}`
+
+## 6. Send and track outbound mail
+
+```bash title="Queue outbound mail"
+curl -X POST "$LIGHTR_API/v1/send" \
+  -H "Authorization: Bearer $LIGHTR_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "from": "ops@your-domain.com",
+    "to": "friend@example.net",
+    "subject": "Lightr check",
+    "text": "Queued from the REST API."
+  }'
+```
+
+Tracking endpoints:
+
+- `POST /v1/send`
+- `GET /v1/messages/{id}/tracking`
+- `POST /unsubscribe/{msg_id}`
+- `GET /unsubscribe/{msg_id}`
+
+## 7. Templates and webhooks
+
+```bash title="Templates and webhooks"
+curl -X POST "$LIGHTR_API/v1/templates" \
+  -H "Authorization: Bearer $LIGHTR_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"org":"Acme Mail","name":"welcome","subject":"Welcome","content":"Hello {{name}}"}'
+
+curl -X POST "$LIGHTR_API/v1/webhooks" \
+  -H "Authorization: Bearer $LIGHTR_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"delivery-events","url":"https://example-app.com/hooks/lightr","events":["message.delivered","message.bounced"]}'
+
+curl "$LIGHTR_API/v1/webhooks" \
+  -H "Authorization: Bearer $LIGHTR_ADMIN_KEY"
+```
+
+Endpoints in this stage:
+
+- `POST /v1/templates`
+- `GET /v1/orgs/{org_id}/templates`
+- `GET /v1/templates/{org_id}/{name}`
+- `GET /v1/webhooks`
+- `POST /v1/webhooks`
+- `GET /v1/webhooks/{id}`
+- `PATCH /v1/webhooks/{id}`
+- `DELETE /v1/webhooks/{id}`
+- `POST /v1/webhooks/{id}/verify`
+- `GET /v1/webhooks/{id}/events`
+- `GET /v1/webhooks/{id}/stats`

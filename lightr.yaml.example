@@ -1,41 +1,58 @@
-# Lightr Email Server Configuration
+# Lightr runtime configuration
+# Keep this file for node/runtime settings and bootstrap access.
+# Domain-owned settings such as auth webhooks, event webhooks, DKIM material,
+# and per-domain TLS bindings should be managed on the domain records themselves.
 
 # Directory for database and blob storage
 data_dir: ./data
+
+server:
+  hostname: "localhost"
+  bind_address: "0.0.0.0"
+
+database:
+  driver: sqlite
+  path: ./data/lightr.db
+  # Postgres example:
+  # driver: postgres
+  # dsn: postgres://user:pass@localhost:5432/lightr?sslmode=disable
 
 # HTTP API server
 http:
   addr: ":8080"
 
+api:
+  # Prefer the apikeys service for scoped access; this remains for bootstrap/admin compatibility.
+  admin_key: "CHANGE_ME"
+
 # SMTP server (inbound/outbound email)
 smtp:
   addr: ":2525"              # Use :25 in production (requires root)
-  domain: "localhost"        # Server hostname for HELO/EHLO
   max_message_bytes: 52428800 # 50MB
   max_recipients: 50
-  allow_insecure: true       # Set to false in production, use TLS
+  allow_insecure: false
 
 # IMAP server (email client access)
 imap:
   addr: ":1143"              # Use :143 (or :993 for TLS) in production
   tls_addr: ":993"           # IMAPS port with implicit TLS
-  allow_insecure: true       # Set to false in production, use TLS
+  allow_insecure: false
 
-# DKIM signing configuration
+# DKIM defaults used when creating domains. Per-domain DKIM settings live with the domain record.
 dkim:
   selector: "default"        # DKIM selector (e.g., "default" -> default._domainkey.yourdomain.com)
   key_bits: 2048             # RSA key size
   # private_key_path: ""     # Path to DKIM private key (generated if not provided)
 
 # TLS configuration
+# cert_file/key_file are node-wide fallback certificates.
+# Per-domain TLS cert/key bindings should be stored on the domain record.
 tls:
   # Default certificate (used as fallback for SNI)
   cert_file: "/etc/letsencrypt/live/mail.example.com/fullchain.pem"
   key_file: "/etc/letsencrypt/live/mail.example.com/privkey.pem"
   
-  # Per-domain certificates for SNI (optional, enables multi-domain support)
-  # When clients connect, the server selects the right certificate based on
-  # the domain they request (Server Name Indication)
+  # Deprecated: prefer domain-owned TLS settings instead of config-level domain_certs.
   # domain_certs:
   #   bounces.inzwi.app:
   #     cert_file: "/etc/letsencrypt/live/bounces.inzwi.app/fullchain.pem"
@@ -43,4 +60,23 @@ tls:
   #   mail.nyanhewepry.ac.zw:
   #     cert_file: "/etc/letsencrypt/live/mail.nyanhewepry.ac.zw/fullchain.pem"
   #     key_file: "/etc/letsencrypt/live/mail.nyanhewepry.ac.zw/privkey.pem"
+
+security:
+  require_tls_for_auth: true
+
+logging:
+  level: info
+
+spam:
+  enabled: true
+  suspicious_threshold: 2.0
+  junk_threshold: 4.0
+  timeout_seconds: 5
+  # Optional DNS blocklists.
+  # dnsbl_zones:
+  #   - zen.spamhaus.org
+  #   - bl.spamcop.net
+  # Optional Rspamd HTTP endpoint for deeper scoring.
+  # rspamd_url: "http://127.0.0.1:11334"
+  # rspamd_password: ""
 

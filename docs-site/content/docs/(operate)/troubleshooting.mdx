@@ -1,0 +1,83 @@
+---
+title: Troubleshooting
+description: Work from runtime health outward into ports, TLS, DNS, queue state, and provider policy without guessing.
+---
+
+## Start with the runtime, not with DNS
+
+```bash title="First checks"
+sudo lightr config validate
+sudo lightr health check
+curl http://127.0.0.1:8080/health
+sudo systemctl status lightr
+```
+
+If these fail, fix the local runtime first. DNS will not rescue a broken host.
+
+## Watch logs while you test
+
+```bash title="Systemd logs"
+sudo journalctl -u lightr -f
+```
+
+If native file logging is enabled:
+
+```bash title="Native log helpers"
+sudo lightr logs show --since 30m --tail 200
+sudo lightr logs show --level error --component smtp
+```
+
+## If the service will not start
+
+- check whether another process already owns the configured ports
+- check whether the service user can read the config and TLS files
+- start on high ports during evaluation instead of forcing privileged ones too early
+- re-run `config validate` after every config edit
+
+## If inbound mail does not arrive
+
+- confirm MX points to the right mail host
+- confirm the mail host resolves publicly
+- confirm the provider and firewall allow inbound SMTP
+- verify the mailbox account exists and the domain was created under the intended name
+
+## If outbound mail stalls or fails
+
+- check provider restrictions on outbound port 25
+- verify SPF, DKIM, DMARC, MX, A, and PTR together
+- inspect the queue instead of guessing
+
+```bash title="Queue checks"
+sudo lightr queue pending --limit 50
+sudo lightr org list
+sudo lightr queue list --org "<org-name>" --status failed --limit 100
+```
+
+If you find a failed queue item and the cause is fixed:
+
+```bash title="Retry a queue item"
+sudo lightr queue retry <message-id>
+```
+
+## If IMAP or auth behaves strangely
+
+- make the configured hostname match the certificate subject and public DNS name
+- keep insecure auth disabled for public traffic
+- re-check the submission and IMAP port choices clients are using
+- confirm you are testing with the actual mailbox password created for that account
+
+## If deliverability is inconsistent
+
+- send to more than one external provider
+- verify headers on received mail instead of relying on guesses
+- re-run `domain verify`
+- use [Domains & DNS](/docs/domains-dns) to re-check the published identity
+
+## Good incident order
+
+1. `config validate`
+2. `health check`
+3. `journalctl -u lightr -f`
+4. `domain verify`
+5. `queue pending` or `queue list`
+6. external provider tests

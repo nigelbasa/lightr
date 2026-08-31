@@ -1,25 +1,30 @@
 .PHONY: build clean install uninstall deb rpm release
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-LDFLAGS := -ldflags "-s -w -X github.com/nigelbasa/lightr/cmd/lightr/cmd.Version=$(VERSION)"
+VERSION_PKG := github.com/nigelbasa/lightr/cmd/lightr
+LDFLAGS := -ldflags "-s -w -X $(VERSION_PKG).version=$(VERSION)"
 BINARY := lightr
 PREFIX ?= /usr/local
 
 # Build targets
 build:
+	mkdir -p dist
 	CGO_ENABLED=0 go build $(LDFLAGS) -o $(BINARY) ./cmd/lightr
 
 build-all: build-linux build-darwin build-windows
 
 build-linux:
+	mkdir -p dist
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build $(LDFLAGS) -o dist/$(BINARY)-linux-amd64 ./cmd/lightr
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build $(LDFLAGS) -o dist/$(BINARY)-linux-arm64 ./cmd/lightr
 
 build-darwin:
+	mkdir -p dist
 	GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build $(LDFLAGS) -o dist/$(BINARY)-darwin-amd64 ./cmd/lightr
 	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build $(LDFLAGS) -o dist/$(BINARY)-darwin-arm64 ./cmd/lightr
 
 build-windows:
+	mkdir -p dist
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build $(LDFLAGS) -o dist/$(BINARY)-windows-amd64.exe ./cmd/lightr
 
 # Install/Uninstall (for local development)

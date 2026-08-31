@@ -1,0 +1,56 @@
+# Production-oriented sample for a single-node SQLite deployment.
+# Generate a fresh copy with:
+#   lightr config sample --profile sqlite --prod --output /etc/lightr/lightr.yaml
+
+data_dir: /var/lib/lightr
+
+server:
+  hostname: mail.example.com
+  bind_address: 0.0.0.0
+
+database:
+  driver: sqlite
+  path: /var/lib/lightr/lightr.db
+
+http:
+  addr: 127.0.0.1:8080
+
+api:
+  admin_key: CHANGE_ME
+
+smtp:
+  addr: :25
+  submission_addr: :587
+  max_message_bytes: 52428800
+  max_recipients: 50
+  allow_insecure: false
+
+imap:
+  addr: :143
+  tls_addr: :993
+  allow_insecure: false
+
+dkim:
+  selector: default
+  key_bits: 2048
+
+tls:
+  cert_file: /etc/letsencrypt/live/mail.example.com/fullchain.pem
+  key_file: /etc/letsencrypt/live/mail.example.com/privkey.pem
+
+logging:
+  level: info
+  file: /var/log/lightr/lightr.log
+
+spam:
+  enabled: true
+  suspicious_threshold: 2
+  junk_threshold: 4
+  timeout_seconds: 5
+  dnsbl_zones:
+    - zen.spamhaus.org
+    - bl.spamcop.net
+  rspamd_url: http://127.0.0.1:11334
+
+security:
+  require_tls_for_auth: true

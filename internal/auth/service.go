@@ -50,8 +50,11 @@ func (s *Service) Authenticate(ctx context.Context, username, password string) (
 		if s.domainRepo != nil {
 			dom, err := s.domainRepo.GetDomainByID(acc.DomainID)
 			if err == nil && dom.AuthWebhookURL != "" {
+				if !dom.AuthWebhookVerified {
+					return nil, errors.New("auth webhook is not verified for this domain")
+				}
 				log.Printf("Auth: Using auth webhook URL for domain %s: %s", dom.Name, dom.AuthWebhookURL)
-				offloader := NewHTTPOffloader(dom.AuthWebhookURL)
+				offloader := NewHTTPOffloader(dom.AuthWebhookURL).WithSecret(dom.AuthWebhookSecret)
 				authResult, err := offloader.OffloadAuth(ctx, username, password)
 				if err != nil {
 					return nil, err
@@ -63,7 +66,7 @@ func (s *Service) Authenticate(ctx context.Context, username, password string) (
 				return acc, nil
 			}
 		}
-		
+
 		// Fall back to global offloader
 		if s.offloader == nil {
 			return nil, errors.New("auth offloader not configured")
@@ -108,12 +111,21 @@ type authRequest struct {
 	Password string `json:"password"`
 }
 
+type verifyRequest struct {
+	Type      string `json:"type"`
+	Domain    string `json:"domain"`
+	Challenge string `json:"challenge"`
+	Timestamp string `json:"timestamp"`
+}
+
 type authResponse struct {
 	Success     bool   `json:"success"`
 	Error       string `json:"error,omitempty"`
 	UserID      string `json:"user_id,omitempty"`
 	Email       string `json:"email,omitempty"`
 	DisplayName string `json:"display_name,omitempty"`
+	Verified    bool   `json:"verified,omitempty"`
+	Challenge   string `json:"challenge,omitempty"`
 }
 
 func (h *HTTPOffloader) OffloadAuth(ctx context.Context, username, password string) (*domain.AuthResult, error) {
@@ -123,10 +135,10 @@ func (h *HTTPOffloader) OffloadAuth(ctx context.Context, username, password stri
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	
+
 	// Add webhook secret header if configured
 	if h.webhookSecret != "" {
-		req.Header.Set("X-Webhook-Secret", h.webhookSecret)
+		req.Header.Set("X-Lightr-Webhook-Secret", h.webhookSecret)
 	}
 
 	log.Printf("Auth offload: POST %s for user %s", h.hookURL, username)
@@ -159,11 +171,51 @@ func (h *HTTPOffloader) OffloadAuth(ctx context.Context, username, password stri
 	}
 
 	log.Printf("Auth offload: Success for %s (display_name: %s)", username, authResp.DisplayName)
-	
+
 	// Return auth result with user info from webhook
 	return &domain.AuthResult{
 		UserID:      authResp.UserID,
 		Email:       authResp.Email,
 		DisplayName: authResp.DisplayName,
 	}, nil
+}
+
+func VerifyDomainAuthWebhook(ctx context.Context, hookURL, secret, domainName string) error {
+	challenge := fmt.Sprintf("lightr-%d", time.Now().UnixNano())
+	reqBody, _ := json.Marshal(verifyRequest{
+		Type:      "verify",
+		Domain:    domainName,
+		Challenge: challenge,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, hookURL, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if secret != "" {
+		req.Header.Set("X-Lightr-Webhook-Secret", secret)
+	}
+	req.Header.Set("X-Lightr-Webhook-Mode", "verify")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("verification webhook returned status %d", resp.StatusCode)
+	}
+
+	var out authResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return err
+	}
+	if out.Verified || out.Success {
+		if out.Challenge == "" || out.Challenge == challenge {
+			return nil
+		}
+	}
+	return errors.New("verification webhook did not confirm challenge")
 }

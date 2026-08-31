@@ -8,9 +8,28 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"time"
 )
+
+// allowedTables maps each safelisted table to its primary-key columns. The
+// restore path uses these for portable ON CONFLICT clauses (works on both
+// SQLite and Postgres). The safelist also prevents a crafted backup file
+// from smuggling SQL via the table name.
+var allowedTables = map[string][]string{
+	"organizations":      {"id"},
+	"domains":            {"id"},
+	"accounts":           {"id"},
+	"messages":           {"id"},
+	"spam_feedback":      {"key_type", "key_value"},
+	"aliases":            {"id"},
+	"alias_reply_routes": {"token"},
+	"email_queue":        {"id"},
+	"bounces":            {"id"},
+	"suppression_list":   {"email"},
+}
 
 // Backup creates a full backup of the lightr data
 type Backup struct {
@@ -72,14 +91,16 @@ func (b *Backup) Create() (string, error) {
 		Timestamp: time.Now().UTC(),
 	}
 
-	// Export database tables
-	tables := []string{
-		"accounts", "messages", "mailboxes", "aliases",
-		"queue", "bounces", "suppression_list",
+	// Export database tables. Iterate in a stable order for reproducible
+	// archives.
+	tables := make([]string, 0, len(allowedTables))
+	for name := range allowedTables {
+		tables = append(tables, name)
 	}
+	sortStrings(tables)
 	for _, table := range tables {
 		if err := b.exportTable(tw, table); err != nil {
-			// Table might not exist, skip
+			// Table might not exist on older installs, skip
 			continue
 		}
 		metadata.Tables = append(metadata.Tables, table)
@@ -103,8 +124,12 @@ func (b *Backup) Create() (string, error) {
 
 // exportTable exports a database table to the archive
 func (b *Backup) exportTable(tw *tar.Writer, table string) error {
-	// Query all rows
-	rows, err := b.db.Query(fmt.Sprintf("SELECT * FROM %s", table))
+	if _, ok := allowedTables[table]; !ok {
+		return fmt.Errorf("table %q not in safelist", table)
+	}
+	// Query all rows. The table name is gated by allowedTables above, so the
+	// interpolation here cannot smuggle SQL.
+	rows, err := b.db.Query(fmt.Sprintf("SELECT * FROM %q", table))
 	if err != nil {
 		return err
 	}
@@ -163,9 +188,10 @@ func (b *Backup) exportFiles(tw *tar.Writer) (int, error) {
 			return err
 		}
 
-		// Relative path in archive
+		// Relative path in archive. Tar entries always use forward slashes
+		// so the archive is portable across platforms.
 		relPath, _ := filepath.Rel(b.dataDir, path)
-		archivePath := filepath.Join("files", relPath)
+		archivePath := "files/" + filepath.ToSlash(relPath)
 
 		if err := b.writeToArchive(tw, archivePath, data); err != nil {
 			return err
@@ -195,12 +221,14 @@ func (b *Backup) writeToArchive(tw *tar.Writer, name string, data []byte) error 
 // Restore restores from a backup file
 type Restore struct {
 	db      *sql.DB
+	driver  string
 	dataDir string
 }
 
-// NewRestore creates a restore handler
-func NewRestore(db *sql.DB, dataDir string) *Restore {
-	return &Restore{db: db, dataDir: dataDir}
+// NewRestore creates a restore handler. driver should be "sqlite" or
+// "postgres"; it controls placeholder rewriting for the destination.
+func NewRestore(db *sql.DB, driver, dataDir string) *Restore {
+	return &Restore{db: db, driver: driver, dataDir: dataDir}
 }
 
 // RestoreResult contains restore statistics
@@ -242,17 +270,19 @@ func (r *Restore) FromFile(filename string) (*RestoreResult, error) {
 			continue
 		}
 
-		// Handle different file types
-		if filepath.Dir(header.Name) == "db" {
-			table := filepath.Base(header.Name)
-			table = table[:len(table)-5] // Remove .json
+		// Tar paths are POSIX. Use path/path (not filepath) so behavior is
+		// stable on Windows.
+		name := filepath.ToSlash(header.Name)
+		switch {
+		case path.Dir(name) == "db" && strings.HasSuffix(name, ".json"):
+			table := strings.TrimSuffix(path.Base(name), ".json")
 			if err := r.restoreTable(table, data); err != nil {
 				result.Errors = append(result.Errors, fmt.Sprintf("restore %s: %v", table, err))
 			} else {
 				result.TablesRestored++
 			}
-		} else if len(header.Name) > 6 && header.Name[:6] == "files/" {
-			relPath := header.Name[6:]
+		case strings.HasPrefix(name, "files/") && len(name) > 6:
+			relPath := name[6:]
 			if err := r.restoreFile(relPath, data); err != nil {
 				result.Errors = append(result.Errors, fmt.Sprintf("restore file %s: %v", relPath, err))
 			} else {
@@ -264,77 +294,161 @@ func (r *Restore) FromFile(filename string) (*RestoreResult, error) {
 	return result, nil
 }
 
-// restoreTable restores a database table
+// restoreTable restores a database table. The table name is validated against
+// allowedTables, and the column set is taken from the live database schema —
+// not the archive — so a crafted backup cannot inject SQL via either name.
+// Uses standard ON CONFLICT upsert syntax that works on both SQLite and
+// Postgres.
 func (r *Restore) restoreTable(table string, data []byte) error {
+	pkCols, ok := allowedTables[table]
+	if !ok {
+		return fmt.Errorf("table %q not in safelist", table)
+	}
+
 	var rows []map[string]interface{}
 	if err := json.Unmarshal(data, &rows); err != nil {
 		return err
 	}
-
 	if len(rows) == 0 {
 		return nil
 	}
 
-	// Get column names from first row
-	var columns []string
-	for col := range rows[0] {
-		columns = append(columns, col)
+	dbCols, err := r.tableColumns(table)
+	if err != nil {
+		return fmt.Errorf("read schema for %s: %w", table, err)
+	}
+	if len(dbCols) == 0 {
+		return fmt.Errorf("table %s has no columns or does not exist", table)
 	}
 
-	// Build insert statement
-	placeholders := ""
-	for i := range columns {
-		if i > 0 {
-			placeholders += ","
+	// Only keep archive columns that exist in the live schema.
+	cols := make([]string, 0, len(dbCols))
+	for _, c := range dbCols {
+		if _, ok := rows[0][c]; ok {
+			cols = append(cols, c)
 		}
-		placeholders += "?"
+	}
+	if len(cols) == 0 {
+		return fmt.Errorf("no overlap between archive and schema for %s", table)
 	}
 
-	stmt := fmt.Sprintf("INSERT OR REPLACE INTO %s (%s) VALUES (%s)",
-		table,
-		joinColumns(columns),
-		placeholders,
-	)
+	pkSet := make(map[string]bool, len(pkCols))
+	for _, p := range pkCols {
+		pkSet[p] = true
+	}
 
+	quoted := make([]string, len(cols))
+	for i, c := range cols {
+		quoted[i] = fmt.Sprintf("%q", c)
+	}
+	quotedPK := make([]string, len(pkCols))
+	for i, c := range pkCols {
+		quotedPK[i] = fmt.Sprintf("%q", c)
+	}
+
+	placeholders := strings.Repeat("?,", len(cols))
+	placeholders = placeholders[:len(placeholders)-1]
+
+	// Build the ON CONFLICT (...) DO UPDATE SET ... clause, skipping the
+	// primary-key columns (they can't change and Postgres rejects updates
+	// to conflict-target columns).
+	var updates []string
+	for _, c := range cols {
+		if pkSet[c] {
+			continue
+		}
+		updates = append(updates, fmt.Sprintf("%q = EXCLUDED.%q", c, c))
+	}
+
+	var stmt string
+	if len(updates) == 0 {
+		// All columns are PK — fall back to DO NOTHING.
+		stmt = fmt.Sprintf("INSERT INTO %q (%s) VALUES (%s) ON CONFLICT (%s) DO NOTHING",
+			table, strings.Join(quoted, ","), placeholders, strings.Join(quotedPK, ","))
+	} else {
+		stmt = fmt.Sprintf("INSERT INTO %q (%s) VALUES (%s) ON CONFLICT (%s) DO UPDATE SET %s",
+			table, strings.Join(quoted, ","), placeholders, strings.Join(quotedPK, ","),
+			strings.Join(updates, ","))
+	}
+
+	stmt = bindPlaceholders(stmt, r.driver)
 	prepared, err := r.db.Prepare(stmt)
 	if err != nil {
 		return err
 	}
 	defer prepared.Close()
 
-	// Insert rows
 	for _, row := range rows {
-		values := make([]interface{}, len(columns))
-		for i, col := range columns {
+		values := make([]interface{}, len(cols))
+		for i, col := range cols {
 			values[i] = row[col]
 		}
 		if _, err := prepared.Exec(values...); err != nil {
 			return err
 		}
 	}
-
 	return nil
 }
 
-// restoreFile restores a mail file
+// bindPlaceholders rewrites `?` to `$N` for Postgres. SQLite uses `?`
+// natively. The two are the only drivers lightr supports.
+func bindPlaceholders(query, driver string) string {
+	if driver != "postgres" {
+		return query
+	}
+	var b strings.Builder
+	arg := 1
+	for _, ch := range query {
+		if ch == '?' {
+			fmt.Fprintf(&b, "$%d", arg)
+			arg++
+			continue
+		}
+		b.WriteRune(ch)
+	}
+	return b.String()
+}
+
+// tableColumns returns the column names of a table from the live schema.
+// Table name is safelist-gated by the caller.
+func (r *Restore) tableColumns(table string) ([]string, error) {
+	rows, err := r.db.Query(fmt.Sprintf("SELECT * FROM %q LIMIT 0", table))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return rows.Columns()
+}
+
+// restoreFile restores a mail file under dataDir. The path must be a relative
+// POSIX path that stays inside dataDir; absolute paths, drive letters, and
+// "../" segments are rejected outright rather than normalized away.
 func (r *Restore) restoreFile(relPath string, data []byte) error {
-	fullPath := filepath.Join(r.dataDir, relPath)
-	
-	// Create directory
+	rel := filepath.ToSlash(relPath)
+	if rel == "" || strings.HasPrefix(rel, "/") || strings.Contains(rel, ":") {
+		return fmt.Errorf("rejecting unsafe path %q", relPath)
+	}
+	cleaned := path.Clean(rel)
+	if cleaned == "." || strings.HasPrefix(cleaned, "../") || cleaned == ".." {
+		return fmt.Errorf("rejecting traversal in %q", relPath)
+	}
+	for _, seg := range strings.Split(cleaned, "/") {
+		if seg == ".." {
+			return fmt.Errorf("rejecting traversal in %q", relPath)
+		}
+	}
+	fullPath := filepath.Join(r.dataDir, filepath.FromSlash(cleaned))
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 		return err
 	}
-
 	return os.WriteFile(fullPath, data, 0644)
 }
 
-func joinColumns(cols []string) string {
-	result := ""
-	for i, col := range cols {
-		if i > 0 {
-			result += ","
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j-1] > s[j]; j-- {
+			s[j-1], s[j] = s[j], s[j-1]
 		}
-		result += col
 	}
-	return result
 }
+

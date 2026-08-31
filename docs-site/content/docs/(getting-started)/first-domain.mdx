@@ -1,0 +1,103 @@
+---
+title: First Domain & Mailbox
+description: Create the first domain, publish DNS, add a mailbox, and verify the first send and receive loop.
+---
+
+This page starts after the runtime passes the checks in
+[Quickstart](/docs/quickstart).
+
+## 1. Create the first managed domain
+
+```bash title="Create a domain"
+sudo lightr domain create \
+  --name your-domain.com \
+  --mail-hostname mail.your-domain.com \
+  --spam-policy junk
+```
+
+Use:
+
+- `your-domain.com` for mailbox addresses such as `ops@your-domain.com`
+- `mail.your-domain.com` for the public mail host behind MX, TLS, and PTR
+
+## 2. Generate the DNS records you need to publish
+
+```bash title="Show recommended DNS records"
+sudo lightr domain dns your-domain.com
+```
+
+Publish the generated:
+
+- MX record
+- SPF record
+- DKIM record
+- DMARC record
+
+Also set reverse DNS for the sending IP at the VPS provider level.
+
+## 3. Verify the published DNS state
+
+```bash title="Verify the domain"
+sudo lightr domain verify your-domain.com
+```
+
+Verification currently expects `MX`, `SPF`, `DKIM`, and `DMARC` to be present
+and valid. `PTR` is reported as guidance, but it is not currently required to
+mark the domain verified.
+
+## 4. Create the first mailbox and alias
+
+```bash title="Create the first mailbox"
+sudo lightr account create \
+  --domain your-domain.com \
+  --email ops@your-domain.com \
+  --password CHANGE_ME
+```
+
+```bash title="Create a simple alias"
+sudo lightr alias create \
+  --domain your-domain.com \
+  --source hello \
+  --type forward \
+  --destinations ops@your-domain.com
+```
+
+This gives you:
+
+- a real login mailbox at `ops@your-domain.com`
+- an address like `hello@your-domain.com` that forwards into it
+
+## 5. Verify both directions
+
+Inbound checks:
+
+- send a message from an outside provider into `ops@your-domain.com`
+- confirm it lands in the mailbox through IMAP or the mailbox API
+
+Outbound checks:
+
+- send a message back out using your mail client or the API
+- verify SPF, DKIM, and DMARC in the received headers
+
+Example API send:
+
+```bash title="Send a test message through the API"
+export LIGHTR_API=http://127.0.0.1:8080
+export LIGHTR_ADMIN_KEY=replace-me
+
+curl -X POST "$LIGHTR_API/v1/send" \
+  -H "Authorization: Bearer $LIGHTR_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "from": "ops@your-domain.com",
+    "to": "friend@example.net",
+    "subject": "Lightr check",
+    "text": "Queued from the first-domain guide."
+  }'
+```
+
+## 6. If something looks wrong
+
+- Use [Domains & DNS](/docs/domains-dns) for record-level fixes
+- Use [Health & Logs](/docs/health-logs) for runtime, queue, and log checks
+- Use [Troubleshooting](/docs/troubleshooting) for a wider incident flow

@@ -8,18 +8,31 @@ import (
 	"net"
 	"net/smtp"
 	"strings"
+	"sync"
 	"time"
 )
 
+type RelayRoute struct {
+	Host          string
+	Port          int
+	Username      string
+	Password      string
+	UseTLS        bool
+	TLSSkipVerify bool
+}
+
 type Relay struct {
 	dkimSigners map[string]*DKIMSigner // domain -> signer
-	hostname    string                  // HELO/EHLO hostname
+	hostname    string                 // HELO/EHLO hostname
+	routes      map[string]RelayRoute  // sender domain -> relay route
+	mu          sync.RWMutex
 }
 
 func NewRelay() *Relay {
 	return &Relay{
 		dkimSigners: make(map[string]*DKIMSigner),
 		hostname:    "localhost",
+		routes:      make(map[string]RelayRoute),
 	}
 }
 
@@ -35,20 +48,38 @@ func (r *Relay) AddDKIMSigner(domain, selector, privateKeyPEM string) error {
 	if err != nil {
 		return err
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.dkimSigners[domain] = signer
 	return nil
+}
+
+func (r *Relay) SetDomainRoute(domain string, route RelayRoute) {
+	if route.Port == 0 {
+		route.Port = 25
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.routes[strings.ToLower(strings.TrimSpace(domain))] = route
+}
+
+func (r *Relay) RemoveDomainRoute(domain string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.routes, strings.ToLower(strings.TrimSpace(domain)))
 }
 
 // Send delivers email to one or more recipients
 // It groups recipients by domain and sends to each domain's MX server
 func (r *Relay) Send(ctx context.Context, from string, to []string, data []byte) error {
 	log.Printf("Relay: sending email from %s to %v (size: %d bytes)", from, to, len(data))
-	
+
 	// 1. Extract domain from 'from' address for DKIM signing
 	fromParts := strings.Split(from, "@")
+	fromDomain := ""
 	if len(fromParts) == 2 {
-		fromDomain := fromParts[1]
-		if signer, ok := r.dkimSigners[fromDomain]; ok {
+		fromDomain = strings.ToLower(fromParts[1])
+		if signer, ok := r.signerForDomain(fromDomain); ok {
 			signedData, err := signer.Sign(data)
 			if err == nil {
 				data = signedData
@@ -58,6 +89,11 @@ func (r *Relay) Send(ctx context.Context, from string, to []string, data []byte)
 			}
 			// If signing fails, we continue with unsigned data
 		}
+	}
+
+	if route, ok := r.routeForDomain(fromDomain); ok && route.Host != "" {
+		log.Printf("Relay: using configured smart host %s:%d for sender domain %s", route.Host, route.Port, fromDomain)
+		return r.sendViaSmartHost(ctx, from, to, data, route)
 	}
 
 	// 2. Group recipients by domain
@@ -95,6 +131,20 @@ func (r *Relay) Send(ctx context.Context, from string, to []string, data []byte)
 	return nil
 }
 
+func (r *Relay) signerForDomain(domain string) (*DKIMSigner, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	signer, ok := r.dkimSigners[domain]
+	return signer, ok
+}
+
+func (r *Relay) routeForDomain(domain string) (RelayRoute, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	route, ok := r.routes[domain]
+	return route, ok
+}
+
 // SendSingle delivers email to a single recipient (backwards compatibility)
 func (r *Relay) SendSingle(from, to string, data []byte) error {
 	return r.Send(context.Background(), from, []string{to}, data)
@@ -123,7 +173,7 @@ func (r *Relay) sendToDomain(ctx context.Context, from, domain string, recipient
 
 		mxHost := strings.TrimSuffix(mx.Host, ".")
 		log.Printf("Relay: trying MX %s (priority %d) for %s", mxHost, mx.Pref, domain)
-		
+
 		err := r.sendToMX(mxHost, from, recipients, data)
 		if err == nil {
 			return nil
@@ -137,68 +187,92 @@ func (r *Relay) sendToDomain(ctx context.Context, from, domain string, recipient
 
 // sendToMX sends email to a specific MX server with proper timeout and TLS support
 func (r *Relay) sendToMX(mxHost, from string, recipients []string, data []byte) error {
+	return r.sendSMTP(mxHost, 25, from, recipients, data, RelayRoute{})
+}
+
+func (r *Relay) sendViaSmartHost(ctx context.Context, from string, recipients []string, data []byte, route RelayRoute) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	return r.sendSMTP(route.Host, route.Port, from, recipients, data, route)
+}
+
+func (r *Relay) sendSMTP(host string, port int, from string, recipients []string, data []byte, route RelayRoute) error {
 	// Create a connection with timeout
 	dialer := &net.Dialer{
 		Timeout: 30 * time.Second,
 	}
-	
-	conn, err := dialer.Dial("tcp", mxHost+":25")
+
+	conn, err := dialer.Dial("tcp", net.JoinHostPort(host, fmt.Sprintf("%d", port)))
 	if err != nil {
 		return fmt.Errorf("connection failed: %v", err)
 	}
 	defer conn.Close()
-	
+
 	// Set read/write deadlines for large messages
 	deadline := time.Now().Add(5 * time.Minute)
 	conn.SetDeadline(deadline)
-	
-	client, err := smtp.NewClient(conn, mxHost)
+
+	client, err := smtp.NewClient(conn, host)
 	if err != nil {
 		return fmt.Errorf("client creation failed: %v", err)
 	}
 	defer client.Close()
-	
+
 	// Send proper HELO/EHLO with our hostname
 	if err := client.Hello(r.hostname); err != nil {
 		return fmt.Errorf("HELO failed: %v", err)
 	}
-	
-	// Try STARTTLS if available
-	if ok, _ := client.Extension("STARTTLS"); ok {
+
+	// Try STARTTLS if available and wanted.
+	if ok, _ := client.Extension("STARTTLS"); ok && (route.UseTLS || route.Host == "") {
 		tlsConfig := &tls.Config{
-			ServerName: mxHost,
-			MinVersion: tls.VersionTLS12,
+			ServerName:         host,
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: route.TLSSkipVerify,
 		}
 		if err := client.StartTLS(tlsConfig); err != nil {
-			log.Printf("Relay: STARTTLS failed for %s: %v (continuing without TLS)", mxHost, err)
+			if route.Host != "" && route.UseTLS {
+				return fmt.Errorf("STARTTLS failed: %v", err)
+			}
+			log.Printf("Relay: STARTTLS failed for %s: %v (continuing without TLS)", host, err)
 		}
 	}
-	
+
+	if route.Username != "" {
+		auth := smtp.PlainAuth("", route.Username, route.Password, host)
+		if err := client.Auth(auth); err != nil {
+			return fmt.Errorf("AUTH failed: %v", err)
+		}
+	}
+
 	// Send the email
 	if err := client.Mail(from); err != nil {
 		return fmt.Errorf("MAIL FROM failed: %v", err)
 	}
-	
+
 	for _, rcpt := range recipients {
 		if err := client.Rcpt(rcpt); err != nil {
 			return fmt.Errorf("RCPT TO %s failed: %v", rcpt, err)
 		}
 	}
-	
+
 	wc, err := client.Data()
 	if err != nil {
 		return fmt.Errorf("DATA command failed: %v", err)
 	}
-	
+
 	_, err = wc.Write(data)
 	if err != nil {
 		wc.Close()
 		return fmt.Errorf("data write failed: %v", err)
 	}
-	
+
 	if err := wc.Close(); err != nil {
 		return fmt.Errorf("data close failed: %v", err)
 	}
-	
+
 	return client.Quit()
 }
