@@ -1,15 +1,24 @@
-# Binaries
-lightr
-lightr-linux
-lightr-linux-amd64
-
+# Built binaries (root-anchored: must NOT match a package dir named lightr)
+/lightr
+/lightr-linux
+/lightr-linux-amd64
 *.exe
-*.dll
-*.so
-*.dylib
 
-# Build output
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
 dist/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
 
 # Data files
 data/
@@ -26,7 +35,10 @@ data/
 # Config with secrets
 lightr.yaml
 !lightr.yaml.example
-!config/config.minimal.yaml
+
+# Scratch
+.tmp-cli/
+.tmp-import/
 
 # IDE
 .idea/
@@ -38,10 +50,6 @@ lightr.yaml
 .DS_Store
 Thumbs.db
 
-# Test output
-coverage.out
-*.test
-
 # Logs
 *.log
 logs/
@@ -51,7 +59,3 @@ docs-site/.next/
 docs-site/node_modules/
 docs-site/out/
 docs-site/public/install.sh
-
-# Scratch
-.tmp-cli/
-.tmp-import/
