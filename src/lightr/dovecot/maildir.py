@@ -42,6 +42,17 @@ class MaildirLayout:
     def inbox(self) -> Path:
         return self.root
 
+    @property
+    def posix(self) -> str:
+        """The root as a POSIX path.
+
+        Whatever platform Lightr runs on while developing, the value
+        handed to Dovecot -- and stored in accounts.maildir_path --
+        describes a Linux filesystem, so it must never carry Windows
+        separators.
+        """
+        return self.root.as_posix()
+
     def folder(self, name: str) -> Path:
         """The Maildir++ directory for a named folder.
 

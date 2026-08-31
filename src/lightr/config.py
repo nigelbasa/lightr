@@ -115,6 +115,12 @@ class DovecotConfig(_Base):
     master_user: str = ""
     master_password: str = ""
 
+    # Shared secret Dovecot's passdb/userdb Lua script presents to
+    # Lightr's internal auth endpoints. Not an API key: Dovecot is a
+    # service, not an operator, and these routes must never be
+    # reachable with an ordinary key.
+    internal_key: str = ""
+
     @property
     def has_master_user(self) -> bool:
         return bool(self.master_user and self.master_password)

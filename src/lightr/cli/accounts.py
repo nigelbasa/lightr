@@ -135,11 +135,11 @@ def create_account(
                 account.password_hash = await hash_password_async(password)
 
             layout = layout_for(state.config.dovecot.maildir_root, f"{local_part}@{domain.name}")
-            account.maildir_path = str(layout.root)
+            account.maildir_path = layout.posix
 
             created = await AccountRepo(conn).create(account)
             created.with_domain(domain)
-            return created, str(layout.root)
+            return created, layout.posix
 
     account, maildir = run(_run)
     output.success(f"Created {account.email}")
