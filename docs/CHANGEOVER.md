@@ -136,6 +136,26 @@ systemctl enable --now dovecot
 lightr dovecot status          # must report a version
 ```
 
+### Leave behind what you do not want
+
+A long-lived install accumulates mail nobody needs to carry. On the one
+this was written against, 918 live messages were 298 MB — of which 688
+were bounce reports and backscatter, and 68 were old test sends. The
+mail an actual person wrote was 162 messages and 54 MB.
+
+```bash
+python scripts/migrate_from_go.py ... --export-mail /var/tmp/mailout   --skip-bounces --skip-tests --mail-since 2026-01-01
+```
+
+Filters affect only what is written to the export directory. The old
+blob store is never modified, so a filter set too aggressively costs
+another export, not the mail. `--skip-tests` is the blunter of the two
+— it drops anything under 1 KB or with "test" in the subject, which
+catches short real mail too. Run without it first and compare counts if
+that matters.
+
+### Then import
+
 `--export-mail` wrote `import-plan.json` with one command per mailbox
 folder. Run them **one at a time**, `--dry-run` first, and record what
 completed — import is not idempotent, so a retry after a partial run

@@ -37,6 +37,13 @@ every receiver notices -- so ``--dkim-keys`` reads the directory.
 Mail is not carried in the database at all: ``messages`` holds metadata
 and the bytes live in the blob store. ``--export-mail`` lays them out
 as one directory per folder so ``lightr mailbox import`` can take them.
+
+A long-lived install accumulates mail nobody wants to carry: bounce
+reports, backscatter from someone spoofing the domain, and years of
+test sends. ``--skip-bounces``, ``--skip-tests`` and ``--mail-since``
+leave those behind. They only affect what is *exported* -- the old blob
+store is never modified, so a filter set too aggressively costs another
+export, not the mail.
 """
 
 from __future__ import annotations
@@ -218,7 +225,12 @@ async def transfer(args: argparse.Namespace) -> int:
             print(f"  {email}")
 
     if args.export_mail:
-        export_mail(old, args.blobs, args.export_mail)
+        export_mail(
+            old, args.blobs, args.export_mail,
+            skip_bounces=args.skip_bounces,
+            skip_tests=args.skip_tests,
+            since=args.mail_since,
+        )
 
     old.close()
     return 0
@@ -243,25 +255,69 @@ def _domain_name(conn: sqlite3.Connection, domain_id: str) -> str:
     return row["name"] if row else "?"
 
 
-def export_mail(conn: sqlite3.Connection, blobs: Path, out: Path) -> None:
+#: A delivery report rather than mail a person wrote.
+BOUNCE_SQL = """(
+    lower(coalesce(m."from",'')) like '%mailer-daemon%'
+    or lower(coalesce(m."from",'')) like '%postmaster@%'
+    or lower(coalesce(m.subject,'')) like 'undeliverable%'
+    or lower(coalesce(m.subject,'')) like '%delivery status notification%'
+    or lower(coalesce(m.subject,'')) like '%returned mail%'
+    or lower(coalesce(m.subject,'')) like '%delivery has failed%'
+)"""
+
+#: An empty subject, "test" in it, or under a kilobyte. In practice
+#: that is someone checking the server works.
+TEST_SQL = """(
+    lower(coalesce(m.subject,'')) like '%test%'
+    or coalesce(m.subject,'') = ''
+    or coalesce(m.size_bytes,0) < 1000
+)"""
+
+
+def export_mail(
+    conn: sqlite3.Connection,
+    blobs: Path,
+    out: Path,
+    *,
+    skip_bounces: bool = False,
+    skip_tests: bool = False,
+    since: str | None = None,
+) -> None:
     """Lay the blob store out as one directory per mailbox folder.
 
     Driven from the database rows, not from what is on disk: the store
     holds orphans that no message references, and deleted mail must not
     come back.
+
+    Filters affect only what is *written here*. The old blob store is
+    never touched, so a filter set too aggressively costs another
+    export rather than the mail.
     """
     print(f"\nExporting mail from {blobs} to {out}")
     counts: dict[tuple[str, str], int] = defaultdict(int)
     missing: list[str] = []
 
-    query = """
+    where = ["m.deleted_at is null"]
+    if skip_bounces:
+        where.append(f"not {BOUNCE_SQL}")
+    if skip_tests:
+        where.append(f"not {TEST_SQL}")
+    if since:
+        where.append("m.received_at >= :since")
+
+    query = f"""
         select m.storage_path, m.folder, m.read_at,
                a.local_part || '@' || d.name as email
         from messages m
         join accounts a on m.account_id = a.id
         join domains d on a.domain_id = d.id
-        where m.deleted_at is null
-    """
+        where {" and ".join(where)}
+    """.replace(":since", f"'{since}'" if since else "''")
+
+    total = conn.execute(
+        "select count(*) from messages m where m.deleted_at is null"
+    ).fetchone()[0]
+
     for row in conn.execute(query):
         source = blobs / row["storage_path"]
         if not source.is_file():
@@ -291,7 +347,10 @@ def export_mail(conn: sqlite3.Connection, blobs: Path, out: Path) -> None:
 
     for entry in plan:
         print(f"  {entry['account']:<32} {entry['folder']:<8} {entry['messages']:>5}")
-    print(f"\n  {sum(counts.values())} message(s); plan written to {manifest}")
+    exported = sum(counts.values())
+    print(f"\n  {exported} of {total} live message(s); plan written to {manifest}")
+    if exported < total:
+        print(f"  {total - exported} left behind by the filters")
     if missing:
         print(f"  {len(missing)} referenced blob(s) were missing and were skipped")
 
@@ -314,6 +373,18 @@ def main() -> int:
     )
     parser.add_argument("--blobs", type=Path, help="Blob store root.")
     parser.add_argument("--export-mail", type=Path, help="Where to lay out the mail.")
+    parser.add_argument(
+        "--skip-bounces", action="store_true",
+        help="Leave delivery reports and backscatter behind.",
+    )
+    parser.add_argument(
+        "--skip-tests", action="store_true",
+        help="Leave test sends behind: no subject, 'test' in it, or under 1KB.",
+    )
+    parser.add_argument(
+        "--mail-since", metavar="YYYY-MM-DD",
+        help="Only export mail received on or after this date.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Report, write nothing.")
     parser.add_argument("--force", action="store_true", help="Write into a non-empty database.")
     args = parser.parse_args()
