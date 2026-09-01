@@ -39,27 +39,56 @@ class AuthFailure(StrEnum):
     ACCOUNT_DISABLED = "account_disabled"
     NO_PASSWORD_SET = "no_password_set"
     PROVIDER_UNAVAILABLE = "provider_unavailable"
+    NO_PROVIDER = "no_provider"
 
 
 @dataclass(frozen=True, slots=True)
 class AuthResult:
-    """The outcome of an authentication attempt."""
+    """The outcome of an authentication attempt.
+
+    ``detail`` says *why*, in a sentence an operator can act on. It is
+    for logs and for `lightr auth test`; it is never returned to
+    whoever was trying to log in, because "no such account" and "wrong
+    password" must look identical from outside.
+    """
 
     ok: bool
     account: Account | None = None
     failure: AuthFailure | None = None
+    provider: str | None = None
+    detail: str | None = None
 
     @property
     def email(self) -> str | None:
         return self.account.email if self.account else None
 
-    @classmethod
-    def success(cls, account: Account) -> AuthResult:
-        return cls(ok=True, account=account)
+    @property
+    def temporary(self) -> bool:
+        """Whether this says "ask again later" rather than "no"."""
+        return self.failure in TEMPORARY_FAILURES
 
     @classmethod
-    def failed(cls, failure: AuthFailure, account: Account | None = None) -> AuthResult:
-        return cls(ok=False, account=account, failure=failure)
+    def success(cls, account: Account, provider: str | None = None) -> AuthResult:
+        return cls(ok=True, account=account, provider=provider)
+
+    @classmethod
+    def failed(
+        cls,
+        failure: AuthFailure,
+        account: Account | None = None,
+        *,
+        detail: str | None = None,
+    ) -> AuthResult:
+        return cls(ok=False, account=account, failure=failure, detail=detail)
+
+
+#: Failures that mean "Lightr could not tell", not "the credentials
+#: were wrong". Dovecot must see these as an internal failure: told a
+#: password is wrong, users change it, and a ten-minute directory
+#: outage becomes a week of support.
+TEMPORARY_FAILURES = frozenset(
+    {AuthFailure.PROVIDER_UNAVAILABLE, AuthFailure.NO_PROVIDER}
+)
 
 
 class PasswordError(ValueError):
@@ -127,6 +156,7 @@ class Authenticator:
     """Authenticates an address against local or offloaded credentials."""
 
     def __init__(self, conn: AsyncConnection) -> None:
+        self._conn = conn
         self._accounts = AccountRepo(conn)
 
     async def authenticate(self, username: str, password: str) -> AuthResult:
@@ -153,15 +183,49 @@ class Authenticator:
     async def _authenticate_external(self, account: Account, password: str) -> AuthResult:
         """Delegate to a configured auth provider.
 
-        Providers (LDAP, OAuth2, OIDC, webhook) land in phase 8; until
-        then an external account cannot log in, and says so rather than
-        falling back to a local hash it should not trust.
+        Never falls back to a local password hash. An account marked
+        external is one whose credentials live somewhere else, and
+        checking a stale local hash when the directory is unreachable
+        would keep a revoked account working.
         """
-        del password
-        return AuthResult.failed(AuthFailure.PROVIDER_UNAVAILABLE, account)
+        from lightr.authproviders import authenticate as ask_providers
+        from lightr.authproviders import providers_for
+
+        domain = account.domain_name or (account.email or "").split("@")[-1]
+        providers = await providers_for(self._conn, account.domain_id, domain)
+        if not providers:
+            return AuthResult.failed(
+                AuthFailure.NO_PROVIDER,
+                account,
+                detail=(
+                    f"{account.email} is set to external authentication but no "
+                    f"provider covers {domain}. Run: lightr auth list"
+                ),
+            )
+
+        outcome = await ask_providers(providers, account.email or "", password)
+        if outcome.ok:
+            return AuthResult.success(account, provider=outcome.provider)
+
+        if outcome.unavailable:
+            # A provider that could not answer is not a provider that
+            # said no. Reporting this as a bad password would tell every
+            # user on the server to change a password that is fine.
+            return AuthResult.failed(
+                AuthFailure.PROVIDER_UNAVAILABLE,
+                account,
+                detail="; ".join(outcome.unavailable),
+            )
+
+        return AuthResult.failed(
+            AuthFailure.BAD_PASSWORD,
+            account,
+            detail=f"refused by {', '.join(outcome.refused)}",
+        )
 
 
 __all__ = [
+    "TEMPORARY_FAILURES",
     "AuthFailure",
     "AuthResult",
     "Authenticator",

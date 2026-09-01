@@ -26,7 +26,8 @@ questions without a database client.
 - SMTP receive (:25), submission (:587), and outbound relay
 - DKIM signing, SPF, DMARC, spam scoring
 - Outbound queue with retries, bounce handling, suppression
-- Organizations, domains, accounts, aliases, API keys, permissions
+- Organizations, domains, accounts, aliases, API keys
+- Authentication, local or offloaded to LDAP, OIDC, or an HTTP endpoint
 - Webhooks, the REST API, and the CLI
 - **Dovecot itself** — configuration, master user, Sieve installation,
   quota reads, and reloads. Lightr drives it via `doveadm`.
@@ -91,6 +92,10 @@ lightr mailbox list ops@example.com --unread
 lightr mailbox read ops@example.com 4821
 lightr mailbox search ops@example.com --from billing@ --since 2026-08-01
 lightr mailbox download ops@example.com 4821 --attachment 2 -o invoice.pdf
+
+lightr auth add ldap corp --domain example.com   --set uri=ldaps://dc.corp --set base_dn=ou=people,dc=corp
+lightr auth enable ops@example.com             # stop using the local password
+lightr auth test ops@example.com               # which provider answered, and why
 
 lightr webhook create billing https://api.example.com/hooks/lightr
 lightr webhook test billing                    # does the receiver accept it?

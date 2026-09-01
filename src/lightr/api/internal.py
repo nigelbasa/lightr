@@ -22,23 +22,28 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 from typing import Any
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from lightr.auth import Authenticator, AuthFailure
+from lightr.auth import TEMPORARY_FAILURES, Authenticator, AuthFailure
 from lightr.dovecot.maildir import layout_for
 from lightr.repo import AccountRepo
+
+log = logging.getLogger("lightr.auth")
 
 #: Header Dovecot's Lua script sends the shared secret in.
 AUTH_HEADER = "X-Lightr-Internal-Key"
 
-#: Failures that mean "this account cannot log in", as opposed to
-#: "the credentials were wrong". Dovecot treats both as a refusal, but
-#: the distinction is worth having in logs.
-_TEMPORARY = frozenset({AuthFailure.PROVIDER_UNAVAILABLE})
+#: Failures that mean "Lightr could not tell", as opposed to "the
+#: credentials were wrong". These come back as 503, which the generated
+#: Lua turns into PASSDB_RESULT_INTERNAL_FAILURE -- so an offloaded
+#: provider being down makes Dovecot say "try later" rather than
+#: telling every user their password is wrong.
+_TEMPORARY = TEMPORARY_FAILURES
 
 
 def _refuse(reason: str, status: int = 401) -> JSONResponse:
@@ -83,6 +88,10 @@ async def passdb(request: Request) -> Response:
     result = await Authenticator(request.state.conn).authenticate(username, password)
     if not result.ok:
         assert result.failure is not None
+        if result.detail:
+            # Logged here, never returned: whoever is logging in must
+            # not learn which provider refused them or why.
+            log.warning("auth failed for %s: %s", username, result.detail)
         status = 503 if result.failure in _TEMPORARY else 401
         return _refuse(result.failure.value, status)
 

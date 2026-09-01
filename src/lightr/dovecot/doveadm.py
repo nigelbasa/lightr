@@ -264,6 +264,20 @@ class Doveadm:
         """Ask Dovecot to re-read its configuration."""
         await self.run("reload")
 
+    async def auth_cache_flush(self, user: str | None = None) -> None:
+        """Drop cached authentication results.
+
+        Dovecot caches passdb answers so a reconnecting mail client
+        does not cost an HTTP call into Lightr -- and, for an offloaded
+        account, a call out to LDAP or an OIDC provider. That cache has
+        to be dropped when a password changes, or the old one keeps
+        working until the TTL expires.
+        """
+        args = ["auth", "cache", "flush"]
+        if user:
+            args += ["-u", user]
+        await self.run(*args)
+
     async def who(self) -> list[dict[str, Any]]:
         """Currently connected users. Useful before a restart."""
         return _as_rows(await self.run_json("who"))

@@ -249,6 +249,20 @@ namespace inbox {{
 auth_mechanisms = plain login
 disable_plaintext_auth = {"no" if dovecot.imap_use_tls is False else "yes"}
 
+#
+# Authentication cache. Mail clients reconnect constantly, and every
+# reconnect is an HTTP call into Lightr -- which, for an account backed
+# by LDAP or an OIDC provider, is a further call out to that provider.
+# Caching in front of all of it is what keeps IMAP responsive.
+#
+# The TTL is deliberately short, and `lightr account passwd` flushes
+# the entry it changed, so a password change takes effect at once
+# rather than whenever the cache happens to expire.
+#
+auth_cache_size = 10M
+auth_cache_ttl = 5 mins
+auth_cache_negative_ttl = 30 secs
+
 mail_plugins = $mail_plugins quota
 
 passdb {{

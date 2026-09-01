@@ -158,14 +158,18 @@ class TestAuthentication:
         result = await Authenticator(conn).authenticate("nohash@acme.test", "anything")
         assert result.failure is AuthFailure.NO_PASSWORD_SET
 
-    async def test_external_account_reports_provider_unavailable(
+    async def test_external_account_with_no_provider_fails_closed(
         self, conn: AsyncConnection, accounts: dict
     ) -> None:
-        """Until phase 8 lands providers, external auth must fail
-        closed rather than fall back to a local hash."""
+        """An account whose credentials live elsewhere must never fall
+        back to a local hash -- that is how a revoked account keeps
+        working."""
         result = await Authenticator(conn).authenticate("ldapuser@acme.test", "anything")
+
         assert not result.ok
-        assert result.failure is AuthFailure.PROVIDER_UNAVAILABLE
+        assert result.failure is AuthFailure.NO_PROVIDER
+        # Temporary, not "wrong password": nothing was asked.
+        assert result.temporary
 
     async def test_bare_local_part_authenticates(
         self, conn: AsyncConnection, accounts: dict

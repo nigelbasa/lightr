@@ -193,8 +193,33 @@ def set_password(
 
     email = run(_run)
     output.success(f"Password updated for {email}")
+    _flush_auth_cache(email)
     if generate:
         output.secret("Password", password)
+
+
+def _flush_auth_cache(email: str) -> None:
+    """Drop Dovecot's cached answer for this account.
+
+    Dovecot caches passdb results so a reconnecting mail client does not
+    cost an HTTP call into Lightr. Without this the *old* password keeps
+    working over IMAP until that cache expires, which is exactly the
+    wrong behaviour for a password reset.
+    """
+    import asyncio
+
+    from lightr.dovecot.doveadm import Doveadm, DoveadmError
+
+    doveadm = Doveadm()
+    if not doveadm.available:
+        return
+    try:
+        asyncio.run(doveadm.auth_cache_flush(email))
+    except DoveadmError as exc:
+        output.warn(
+            f"could not clear Dovecot's auth cache: {exc}. The old password may "
+            f"keep working over IMAP for a few minutes."
+        )
 
 
 @app.command("update")

@@ -228,6 +228,46 @@ lightr suppression check them@example.com # why did mail to them stop?
 lightr queue list --status failed        # what failed to send, and why
 ```
 
+### Offloaded authentication
+
+Accounts authenticate against a local password by default. To point
+them at a directory instead:
+
+```bash
+lightr auth add ldap corp --domain example.com   --set uri=ldaps://dc.corp.example.com   --set base_dn=ou=people,dc=corp,dc=example,dc=com   --set bind_dn='cn=lightr,ou=services,dc=corp,dc=example,dc=com'   --set bind_password='...'   --set 'user_filter=(mail={username})'
+
+lightr auth enable ops@example.com     # its local password stops working
+lightr auth test ops@example.com       # try a real login
+```
+
+`lightr auth test` runs the same path SMTP, the API, and Dovecot's
+passdb all run, and says which provider answered. Use it before telling
+anyone their mail client will work.
+
+An HTTP endpoint instead of a directory:
+
+```bash
+lightr auth add webhook app --domain example.com   --set url=https://app.example.com/auth --set secret='...'
+```
+
+It receives `{"username", "password"}` signed with `X-Lightr-Signature`
+exactly as event webhooks are, and should answer `{"ok": true}` or
+401/403. **Answer 5xx if you cannot check** — a 200 saying `ok: false`
+means "wrong password", and every user will be told to change one that
+is fine.
+
+OAuth2/OIDC validates a bearer token, because there is no browser on an
+IMAP login:
+
+```bash
+lightr auth add oidc sso --domain example.com   --set introspection_url=https://idp.example.com/oauth2/introspect   --set client_id=lightr --set client_secret='...'   --set username_claim=email
+```
+
+The claim must name the account being logged into. A valid token
+belonging to someone else is refused.
+
+LDAP needs the extra: `pip install 'lightr[ldap]'`.
+
 ### Webhooks
 
 ```bash

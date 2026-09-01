@@ -172,6 +172,75 @@ class TestPassdb:
         )
         assert response.status_code == 503
 
+    async def test_a_provider_that_times_out_is_503_not_401(
+        self, client: httpx.AsyncClient, engine: AsyncEngine
+    ) -> None:
+        """The assertion that stops someone "simplifying" this to a 401.
+
+        Told their password is wrong, users change it. A directory that
+        is down for ten minutes must not turn into a week of support.
+        """
+        import asyncio
+
+        from lightr.authproviders.base import ProviderBase
+
+        class Hangs(ProviderBase):
+            kind = "hangs"
+
+            async def authenticate(self, username: str, password: str) -> None:
+                return await self.bounded(asyncio.sleep(5))
+
+        async def only_hangs(conn, domain_id, domain):
+            return [Hangs(name="corp", config={}, timeout=0.05)]
+
+        import lightr.authproviders as providers
+
+        original = providers.providers_for
+        providers.providers_for = only_hangs
+        try:
+            response = await client.post(
+                "/internal/auth/verify",
+                json={"username": "ldapuser@acme.test", "password": "x"},
+                headers=internal(),
+            )
+        finally:
+            providers.providers_for = original
+
+        assert response.status_code == 503
+        assert response.json()["reason"] == "provider_unavailable"
+
+    async def test_a_provider_refusing_is_401_not_503(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        """The other half: a provider that answered "no" is a real
+        refusal, and Dovecot should say so rather than retry."""
+        from lightr.authproviders.base import ProviderBase
+
+        class Refuses(ProviderBase):
+            kind = "refuses"
+
+            async def authenticate(self, username: str, password: str) -> None:
+                return None
+
+        async def only_refuses(conn, domain_id, domain):
+            return [Refuses(name="corp", config={})]
+
+        import lightr.authproviders as providers
+
+        original = providers.providers_for
+        providers.providers_for = only_refuses
+        try:
+            response = await client.post(
+                "/internal/auth/verify",
+                json={"username": "ldapuser@acme.test", "password": "x"},
+                headers=internal(),
+            )
+        finally:
+            providers.providers_for = original
+
+        assert response.status_code == 401
+        assert response.json()["reason"] == "bad_password"
+
     @pytest.mark.parametrize(
         "payload",
         [{}, {"username": "ops@acme.test"}, {"password": "x"}, {"username": "  "}],

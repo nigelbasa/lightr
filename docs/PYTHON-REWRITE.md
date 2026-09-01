@@ -19,16 +19,46 @@ All nine phases are built. 864 tests pass; ruff clean.
 
 ### What is deliberately not built
 
-* **Auth offload** (LDAP, OAuth2, OIDC, webhook). The `auth_providers`
-  table and the `AuthMode.EXTERNAL` path exist, and an external account
-  **fails closed** rather than falling back to a local hash. The
-  providers themselves are not implemented.
 * **A permissions engine.** API keys carry scopes and those are
-  enforced; the `permission_policies` / `sudo_sessions` tables are
-  modelled but unused.
-* **Backup, export, and mbox/maildir/eml import.**
-* **Webhook management routes.** Delivery, signing, and emission work;
-  creating and editing webhooks over HTTP does not.
+  enforced, which is what multi-tenant isolation rests on; the
+  `permission_policies` / `sudo_sessions` tables are modelled but
+  unused. They would buy finer-grained operator policy, which no
+  install has yet needed.
+* **RADIUS.** The `auth_providers.provider` column's comment lists it
+  alongside the four that are built. It is vanishingly rare for mail,
+  and a row naming it is **refused** rather than accepted and silently
+  ignored.
+
+### Offloaded authentication, as built
+
+Three providers: LDAP (bind, not hash comparison), an HTTP webhook, and
+OAuth2/OIDC token validation. One contract underneath all three:
+
+| the provider says | Lightr reports | Dovecot sees |
+| --- | --- | --- |
+| these credentials are good | success | `PASSDB_RESULT_OK` |
+| no | `bad_password` (401) | `PASSWORD_MISMATCH` |
+| nothing — it could not answer | `provider_unavailable` (503) | `INTERNAL_FAILURE` |
+
+The third row is the one that matters. Told a password is wrong, users
+change it; a ten-minute directory outage reported as a wrong password
+becomes a week of support. Same reasoning as a DMARC `temperror`: a
+lookup that did not happen is not evidence.
+
+There is no browser on the IMAP login path, so the OIDC provider
+**validates a bearer token** rather than running a redirect flow — and
+checks that the token's claim names *this* account. A valid token
+belonging to someone else must not open this mailbox, and an answer
+carrying no identifying claim at all fails closed.
+
+Every provider is bounded by a timeout it cannot exceed, and Dovecot's
+own `auth_cache` sits in front of the whole path, so a reconnecting
+mail client does not cost a round trip to the directory.
+`lightr account passwd` flushes the cache entry it changed.
+
+The Go engine's per-domain `domains.auth_webhook_url` still answers,
+but only when `auth_webhook_verified` is set, and an explicit
+`auth_providers` row always wins over it.
 
 ### Decisions, now settled
 

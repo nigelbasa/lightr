@@ -17,6 +17,7 @@ from lightr import __version__
 
 from . import (
     accounts,
+    authproviders,
     backup,
     dovecot,
     mailbox,
@@ -45,6 +46,7 @@ app.add_typer(operations.apikey_app, name="apikey")
 app.add_typer(operations.queue_app, name="queue")
 app.add_typer(operations.suppression_app, name="suppression")
 app.add_typer(webhooks.app, name="webhook")
+app.add_typer(authproviders.app, name="auth")
 app.add_typer(backup.app, name="backup")
 
 
@@ -276,6 +278,7 @@ def entrypoint() -> None:
     """
     from lightr.apikeys import APIKeyError
     from lightr.auth import PasswordError
+    from lightr.authproviders.base import ProviderError
     from lightr.dovecot.mailbox import MailboxError
     from lightr.dovecot.maildir import MaildirError
     from lightr.dovecot.sieve import SieveError
@@ -284,7 +287,9 @@ def entrypoint() -> None:
     # is what would normally translate typer.Exit into a status code.
     try:
         app()
-    except (APIKeyError, PasswordError, MailboxError, MaildirError, SieveError) as exc:
+    except (
+        APIKeyError, PasswordError, ProviderError, MailboxError, MaildirError, SieveError
+    ) as exc:
         output.stderr.print(f"[red]error[/red] {exc}")
         sys.exit(1)
     except KeyboardInterrupt:  # pragma: no cover - interactive only

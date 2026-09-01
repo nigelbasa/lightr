@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from lightr.apikeys import APIKeyError
 from lightr.auth import PasswordError
+from lightr.authproviders.base import ProviderError
 from lightr.config import Config
 from lightr.db.engine import create_engine
 from lightr.dovecot.lmtp import LMTPError
@@ -99,6 +100,8 @@ def run(coro_fn: Callable[..., Awaitable[T]], *args: Any, **kwargs: Any) -> T:
     except PasswordError as exc:
         _fail(str(exc))
     except APIKeyError as exc:
+        _fail(str(exc))
+    except ProviderError as exc:
         _fail(str(exc))
     except (MailboxError, MaildirError, SieveError) as exc:
         _fail(str(exc))
