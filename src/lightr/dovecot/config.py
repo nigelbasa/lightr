@@ -175,6 +175,12 @@ def dovecot_conf(cfg: Config, lua_path: Path) -> str:
         dovecot.lmtp_socket.as_posix() if dovecot.lmtp_socket else "/run/dovecot/lmtp"
     )
 
+    sieve_dir = dovecot.sieve_dir.as_posix()
+    # Dovecot requires this on a single line, however long it gets.
+    sieve_setting = (
+        f"file:{sieve_dir}/%d/%n/scripts;active={sieve_dir}/%d/%n/active.sieve"
+    )
+
     master_user_block = ""
     if dovecot.master_user:
         master_user_block = f"""
@@ -272,7 +278,7 @@ protocol lmtp {{
 }}
 
 plugin {{
-  sieve = file:{dovecot.sieve_dir.as_posix()}/%d/%n/scripts;active={dovecot.sieve_dir.as_posix()}/%d/%n/active.sieve
+  sieve = {sieve_setting}
   sieve_extensions = +relational +comparator-i;ascii-numeric +imap4flags +mailbox +body
 
   quota = maildir:User quota
