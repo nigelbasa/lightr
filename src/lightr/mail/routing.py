@@ -142,7 +142,7 @@ class Router:
 
         try:
             destinations = await self._expand(alias.destinations, seen=frozenset({address}))
-        except _AliasLoop:
+        except _AliasLoopError:
             return Route(recipient, Disposition.REJECT, domain_id=domain.id,
                          reason=RejectReason.ALIAS_LOOP)
 
@@ -202,7 +202,7 @@ class Router:
         terminates.
         """
         if depth >= MAX_ALIAS_DEPTH:
-            raise _AliasLoop
+            raise _AliasLoopError
 
         resolved: list[str] = []
         for destination in destinations:
@@ -210,7 +210,7 @@ class Router:
             if not address or "@" not in address:
                 continue
             if address in seen:
-                raise _AliasLoop
+                raise _AliasLoopError
 
             local_part, domain_name = address.split("@", 1)
             try:
@@ -254,7 +254,7 @@ class Router:
         return UUID(row._mapping["id"]), f"{local_part}@{row._mapping['name']}"
 
 
-class _AliasLoop(Exception):
+class _AliasLoopError(Exception):
     """Internal signal: alias expansion cycled or ran too deep."""
 
 

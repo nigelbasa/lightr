@@ -135,8 +135,16 @@ def add_received(
         f"\tby {hostname} with {protocol} id {make_msgid(domain=hostname)}\r\n"
         f"\tfor <{recipient}>; {stamp}"
     )
-    # Received must be the topmost header.
-    message._headers.insert(0, ("Received", value))
+    # Received must be the topmost header, and the stdlib email package
+    # has no public API for prepending. Message._headers is the usual
+    # way; guard it so a future change degrades to appending -- which
+    # still records the hop, just out of order -- rather than losing
+    # the trace entirely.
+    headers = getattr(message, "_headers", None)
+    if isinstance(headers, list):
+        headers.insert(0, ("Received", value))
+    else:  # pragma: no cover - only on a future stdlib change
+        message["Received"] = value
     return message
 
 
