@@ -170,11 +170,10 @@ def serve() -> None:
         )
         raise typer.Exit(1)
 
-    if not cfg.dovecot.internal_key:
-        output.warn(
-            "No Dovecot internal key configured -- IMAP logins will fail. "
-            "Run: lightr dovecot setup"
-        )
+    # Reconcile on every start. An install that drifted -- a
+    # hand-edited conf, a package upgrade that replaced a file -- comes
+    # back into line without anyone noticing it had gone.
+    _configure_dovecot(cfg, state.config_path or type(cfg).default_path())
 
     try:
         asyncio.run(Server(cfg).serve_forever())
@@ -223,7 +222,37 @@ def init(
 
     output.success(f"Wrote {target}")
     output.success(f"Initialised database at {cfg.database.path}")
+
+    # Dovecot is an internal component, so configuring it is part of
+    # initialising -- not a second command an operator has to know to
+    # run, and not something they can forget.
+    _configure_dovecot(cfg, target)
+
     output.info("Next: lightr domain create <your-domain>")
+
+
+def _configure_dovecot(cfg: object, config_path: Path) -> None:
+    """Bring Dovecot in line with this config, reporting what happened.
+
+    Never fatal: mailboxes being unavailable is worth a loud warning,
+    but the rest of the engine still works without them.
+    """
+    import asyncio
+
+    from lightr.dovecot.manage import DovecotManager
+
+    manager = DovecotManager(cfg)  # type: ignore[arg-type]
+    report = asyncio.run(manager.reconcile(save_config=config_path))
+
+    if report.generated:
+        output.info(f"Generated {', '.join(report.generated)}")
+    for change in report.changes:
+        if change.action == "written":
+            output.success(f"Configured Dovecot: {change.path}")
+    if report.reloaded:
+        output.success("Dovecot reloaded")
+    for warning in report.warnings:
+        output.warn(warning)
 
 
 def entrypoint() -> None:

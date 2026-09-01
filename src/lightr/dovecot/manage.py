@@ -59,6 +59,7 @@ class InstallReport:
     changes: list[Change] = field(default_factory=list)
     reloaded: bool = False
     warnings: list[str] = field(default_factory=list)
+    generated: list[str] = field(default_factory=list)
 
     @property
     def changed(self) -> bool:
@@ -112,9 +113,71 @@ class DovecotManager:
 
     # -- the whole job ----------------------------------------------------
 
-    async def install(self, *, reload: bool = True) -> InstallReport:
-        """Generate, verify, and install everything Dovecot needs."""
+    async def reconcile(self, *, save_config: Path | None = None) -> InstallReport:
+        """Make Dovecot match Lightr's configuration. Safe to call always.
+
+        This is the automatic path: ``lightr init`` calls it, and
+        ``lightr serve`` calls it on every start, so an install that has
+        drifted -- a hand-edited conf, a package upgrade that replaced
+        a file, a config change nobody re-applied -- converges on its
+        own. An operator never has to know it happened.
+
+        Never raises. Dovecot being misconfigured is worth a loud
+        warning, but it must not stop Lightr from starting: the API,
+        the queue, and SMTP receive are all still useful while
+        mailboxes are down, and refusing to boot would turn a mailbox
+        problem into a total outage.
+        """
         report = InstallReport()
+
+        missing = self.fill_in_gaps()
+        if missing and save_config is not None:
+            try:
+                self.cfg.save(save_config)
+                report.generated = missing
+            except OSError as exc:
+                report.warnings.append(
+                    f"generated {', '.join(missing)} but could not save "
+                    f"{save_config}: {exc}"
+                )
+
+        if not self.doveadm.available:
+            report.warnings.append(
+                "doveadm was not found, so Dovecot was not configured. "
+                "Mailboxes will not work until it is installed: "
+                "apt install dovecot-core"
+            )
+            return report
+
+        try:
+            return await self.install(reload=True, report=report)
+        except (DovecotManagementError, OSError) as exc:
+            report.warnings.append(f"could not configure Dovecot: {exc}")
+            return report
+
+    def fill_in_gaps(self) -> list[str]:
+        """Generate any secret Dovecot needs that is not set yet.
+
+        An operator should never have to invent, hash, or type these.
+        Returns what was created, for reporting.
+        """
+        from lightr.auth import generate_password
+
+        created: list[str] = []
+        if not self.cfg.dovecot.internal_key:
+            self.cfg.dovecot.internal_key = dovecot_config.generate_internal_key()
+            created.append("internal auth key")
+        if not self.cfg.dovecot.has_master_user:
+            self.cfg.dovecot.master_user = DEFAULT_MASTER_USER
+            self.cfg.dovecot.master_password = generate_password(32)
+            created.append("master user")
+        return created
+
+    async def install(
+        self, *, reload: bool = True, report: InstallReport | None = None
+    ) -> InstallReport:
+        """Generate, verify, and install everything Dovecot needs."""
+        report = report if report is not None else InstallReport()
 
         # Everything from here is rolled back together. A half-written
         # configuration -- the Lua auth script present but the conf

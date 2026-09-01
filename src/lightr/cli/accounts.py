@@ -144,6 +144,11 @@ def create_account(
     account, maildir = run(_run)
     output.success(f"Created {account.email}")
     output.info(f"Maildir: {maildir}")
+
+    # Provision the mailbox now rather than waiting for the first
+    # delivery, so the account is selectable in a mail client
+    # immediately instead of looking broken until its first message.
+    _provision(account.email, account.quota_bytes)
     if generate and password:
         output.secret("Password", password)
     if not account.password_hash and not external:
@@ -255,6 +260,34 @@ def delete_account(
             f"Mail at {found.maildir_path} was NOT removed -- delete it manually "
             "once you are sure it is not needed."
         )
+
+
+def _provision(email: str | None, quota_bytes: int | None) -> None:
+    """Create the mailbox in Dovecot. Never fatal.
+
+    Dovecot creates a Maildir on first delivery anyway, so failing here
+    costs nothing but a slightly confusing first few minutes -- not an
+    account that does not exist.
+    """
+    if email is None:
+        return
+
+    import asyncio
+
+    from lightr.dovecot.doveadm import DoveadmError
+    from lightr.dovecot.manage import DovecotManager
+
+    manager = DovecotManager(state.config)
+    if not manager.doveadm.available:
+        output.info("Dovecot will create the mailbox on first delivery.")
+        return
+
+    try:
+        asyncio.run(manager.provision_account(email, quota_bytes))
+    except (DoveadmError, OSError) as exc:
+        output.warn(f"could not pre-create the mailbox: {exc}")
+        return
+    output.success("Mailbox provisioned in Dovecot")
 
 
 def _prompt_new_password() -> str:

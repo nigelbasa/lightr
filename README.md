@@ -54,7 +54,6 @@ sudo apt install ./lightr_0.2.0_all.deb
 
 ```bash
 lightr init --hostname mail.example.com
-lightr dovecot install                  # configures Dovecot completely
 
 lightr domain create example.com
 lightr domain dkim example.com --generate
@@ -65,11 +64,17 @@ lightr account create ops@example.com   # prompts for a password
 lightr serve
 ```
 
-`lightr dovecot install` generates the auth key and master user, writes
-Dovecot's configuration, verifies it with Dovecot's own parser, and
-reloads the service. You never edit `dovecot.conf`, hash a master
-password, or restart Dovecot by hand -- Lightr manages it as an
-internal component.
+There is no step for Dovecot. `lightr init` generates its auth key and
+master user, writes its configuration, verifies that configuration with
+Dovecot's own parser, and reloads the service. `lightr serve` does the
+same check on every start, so an install that drifts — a hand-edited
+file, a package upgrade that replaced one — comes back into line on its
+own. Creating an account provisions its mailbox.
+
+You never edit `dovecot.conf`, hash a master password, or restart
+Dovecot. If Dovecot is missing or broken, Lightr says so and keeps
+running: the API, the queue, and SMTP receive still work while
+mailboxes do not.
 
 ## The CLI
 
@@ -90,7 +95,6 @@ lightr mailbox download ops@example.com 4821 --attachment 2 -o invoice.pdf
 lightr status
 lightr dovecot status                          # what Lightr sees of Dovecot
 lightr dovecot quota                           # real usage, as Dovecot measures it
-lightr dovecot sieve ops@example.com           # compile and install filter rules
 lightr queue stats
 lightr suppression check someone@example.com   # why did mail stop?
 ```
