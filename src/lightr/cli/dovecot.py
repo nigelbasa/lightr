@@ -206,3 +206,70 @@ def provision(
         empty="No accounts to provision.",
     )
     output.success(f"{len(created)} created, {len(results) - len(created)} already present")
+
+
+@app.command("sieve")
+def sieve(
+    account: Annotated[
+        str | None, typer.Argument(help="One account, or omit for all of them.")
+    ] = None,
+    show: Annotated[
+        bool, typer.Option("--show", help="Print the script instead of installing it.")
+    ] = False,
+    fmt: Annotated[Format | None, typer.Option("--format", "-f")] = None,
+) -> None:
+    """Compile filter rules into Sieve and install them for Dovecot.
+
+    Run this after changing filter rules: Dovecot executes the
+    installed script, not the rules in the database.
+    """
+    from lightr.dovecot.sieve import compile_script
+    from lightr.dovecot.sieve_install import SieveInstaller
+
+    sieve_dir = state.config.dovecot.sieve_dir
+
+    if show:
+        if not account:
+            raise typer.BadParameter("--show needs an account")
+
+        async def _render() -> str:
+            async with db() as conn:
+                found = await AccountRepo(conn).resolve(account)
+                rules = await SieveInstaller(conn, sieve_dir).rules_for(found.id)
+            return compile_script(rules).render()
+
+        output.raw(run(_render))
+        return
+
+    async def _install() -> list:
+        async with db() as conn:
+            installer = SieveInstaller(conn, sieve_dir)
+            if account:
+                found = await AccountRepo(conn).resolve(account)
+                if found.email is None:
+                    raise typer.BadParameter(f"no address for {account!r}")
+                return [await installer.install(found.id, found.email)]
+            return await installer.install_all()
+
+    results = run(_install)
+    output.render(
+        [
+            {
+                "account": r.email,
+                "rules": r.rules,
+                "path": str(r.path),
+                "status": "updated" if r.changed else "unchanged",
+            }
+            for r in results
+        ],
+        [
+            ("account", "ACCOUNT"),
+            ("rules", "RULES"),
+            ("status", "STATUS"),
+            ("path", "SCRIPT"),
+        ],
+        fmt=fmt,
+        empty="No accounts to generate Sieve for.",
+    )
+    changed = sum(1 for r in results if r.changed)
+    output.success(f"{changed} script(s) updated, {len(results) - changed} unchanged")

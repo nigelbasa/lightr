@@ -24,8 +24,23 @@ def go_ddl() -> str:
 
 @pytest.fixture
 def cfg(tmp_path: Path) -> Config:
-    """A config pointing at a scratch SQLite database."""
-    return Config.model_validate({"data_dir": str(tmp_path)})
+    """A config with every path confined to a scratch directory.
+
+    The Dovecot paths default to absolute system locations
+    (/var/mail/lightr, /var/lib/lightr/sieve). Left alone, tests write
+    Maildirs and Sieve scripts outside their tmp directory, leak state
+    between runs, and could clobber a real install on a dev box.
+    """
+    return Config.model_validate(
+        {
+            "data_dir": str(tmp_path),
+            "dovecot": {
+                "maildir_root": str(tmp_path / "mail"),
+                "sieve_dir": str(tmp_path / "sieve"),
+                "lmtp_socket": None,
+            },
+        }
+    )
 
 
 @pytest_asyncio.fixture
