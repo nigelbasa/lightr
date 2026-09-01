@@ -34,7 +34,7 @@ Phases 0–7 are built and tested; 8–9 are not started. 536 tests pass.
 
 ---
 
-Status: planning, decisions locked. No code written.
+Decisions locked; see the status table above for what is built.
 
 Source of truth for scope: [CORE.md](CORE.md).
 

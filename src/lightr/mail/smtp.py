@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from email import message_from_bytes
 from email.message import Message
 from email.policy import SMTP as SMTP_POLICY
+from typing import Any
 
 from aiosmtpd.smtp import AuthResult, Envelope, LoginPassword, Session
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -199,6 +200,13 @@ class LightrHandler:
         outcome = DeliveryOutcome()
 
         message = message_from_bytes(raw, policy=SMTP_POLICY)
+
+        # A null sender is the RFC 5321 signal for a bounce. Recording
+        # it is what keeps the suppression list current; without this
+        # the engine keeps mailing dead addresses forever.
+        if not mail_from:
+            await self.record_bounces(raw)
+
         analysis = await self.analyse(message, mail_from=mail_from, helo=helo)
 
         async with self.engine.begin() as conn:
@@ -242,6 +250,59 @@ class LightrHandler:
             log.warning("LMTP refused %s: %s %s", status.recipient,
                         status.code, status.message)
         return outcome
+
+    async def record_bounces(self, raw: bytes) -> int:
+        """Parse a bounce and suppress any dead addresses it names.
+
+        Never raises: a malformed bounce must not stop the message it
+        arrived in from being delivered to the postmaster mailbox, where
+        a human can look at it.
+        """
+        from lightr.mail.bounce import BounceRepo, parse
+
+        try:
+            bounces = parse(raw)
+        except Exception:
+            log.exception("could not parse a bounce")
+            return 0
+
+        if not bounces:
+            return 0
+
+        suppressed = 0
+        async with self.engine.begin() as conn:
+            repo = BounceRepo(conn)
+            for bounce in bounces:
+                owner = await self._owner_of(conn, bounce.recipient)
+                if owner is None:
+                    # We do not know which tenant sent it. Still worth
+                    # suppressing, just not attributable.
+                    if bounce.should_suppress:
+                        await repo.suppress(
+                            bounce.recipient, reason=str(bounce.bounce_type)
+                        )
+                        suppressed += 1
+                    continue
+                org_id, domain_id = owner
+                if await repo.record(bounce, org_id=org_id, domain_id=domain_id):
+                    suppressed += 1
+
+        if suppressed:
+            log.info("suppressed %d address(es) from a bounce", suppressed)
+        return suppressed
+
+    async def _owner_of(self, conn: object, recipient: str) -> tuple[Any, Any] | None:
+        """Which org and domain a bounced address belongs to, if ours."""
+        del recipient
+        from lightr.repo import DomainRepo
+
+        # A bounce names the *remote* address that failed, so it rarely
+        # belongs to a local domain. Attribute it to the only domain
+        # when there is one, and leave it unattributed otherwise.
+        domains = await DomainRepo(conn).list(limit=2)  # type: ignore[arg-type]
+        if len(domains) == 1:
+            return domains[0].org_id, domains[0].id
+        return None
 
     async def analyse(
         self, message: Message, *, mail_from: str, helo: str
