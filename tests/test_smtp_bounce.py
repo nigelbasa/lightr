@@ -7,6 +7,8 @@ addresses and burns sending reputation.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine
 from tests.test_bounce import HARD_DSN, SOFT_DSN
@@ -30,10 +32,13 @@ async def world(engine: AsyncEngine) -> None:
 
 
 @pytest_asyncio.fixture
-async def handler(cfg: Config, engine: AsyncEngine, world: None) -> LightrHandler:
+async def handler(
+    cfg: Config, engine: AsyncEngine, world: None
+) -> AsyncIterator[LightrHandler]:
     h = LightrHandler(cfg, engine)
     h.lmtp = FakeLMTP()  # type: ignore[assignment]
-    return h
+    yield h
+    await h.webhooks.drain()
 
 
 class TestBounceIngestion:

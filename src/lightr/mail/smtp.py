@@ -17,13 +17,14 @@ for local recipients and the outbound queue for the rest.
 from __future__ import annotations
 
 import logging
+from base64 import b64decode
 from dataclasses import dataclass, field
 from email import message_from_bytes
 from email.message import Message
 from email.policy import SMTP as SMTP_POLICY
 from typing import Any
 
-from aiosmtpd.smtp import AuthResult, Envelope, LoginPassword, Session
+from aiosmtpd.smtp import MISSING, AuthResult, Envelope, LoginPassword, Session
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from lightr.auth import Authenticator
@@ -80,6 +81,12 @@ class LightrHandler:
         self.engine = engine
         self.require_auth = require_auth
         self.lmtp = LMTPClient(cfg.dovecot)
+
+        from lightr.webhooks.emitter import Emitter
+
+        # Fire-and-forget: a slow webhook receiver must not slow down
+        # or fail mail delivery.
+        self.webhooks = Emitter(engine)
 
     # -- envelope phases ------------------------------------------------
 
@@ -153,10 +160,69 @@ class LightrHandler:
 
     # -- authentication -------------------------------------------------
 
-    async def handle_AUTH_PLAIN(  # noqa: N802
-        self, server: object, session: Session, envelope: Envelope, args: list[str]
-    ) -> AuthResult:  # pragma: no cover - exercised via authenticate()
-        return await self.authenticate(server, session, envelope, "PLAIN", None)
+    # Authentication is implemented as auth_<MECHANISM> methods on this
+    # handler, not through aiosmtpd's `authenticator=` callback.
+    #
+    # That callback is invoked from a *synchronous* method
+    # (SMTP._authenticate) which does not await its result. Passing an
+    # async function there returns a coroutine object, which aiosmtpd
+    # then evaluates as "not False, not MISSING, not an AuthResult" and
+    # treats as a successful login -- accepting every password, for
+    # every account, including ones that do not exist.
+    #
+    # Handler auth_<MECH> methods *are* awaited, so checking credentials
+    # against the database is only safe here.
+
+    async def auth_PLAIN(  # noqa: N802 - aiosmtpd's naming
+        self, server: Any, args: list[str]
+    ) -> AuthResult:
+        """AUTH PLAIN, per RFC 4616."""
+        if len(args) == 1:
+            blob = await server.challenge_auth("")
+            if blob is MISSING:
+                return AuthResult(success=False)
+        else:
+            try:
+                blob = b64decode(args[1].encode(), validate=True)
+            except Exception:
+                await server.push("501 5.5.2 Can't decode base64")
+                return AuthResult(success=False, handled=True)
+
+        try:
+            # "{authz_id}\0{login}\0{password}"; authz_id is ignored.
+            _, login, password = blob.split(b"\x00")
+        except ValueError:
+            await server.push("501 5.5.2 Can't split auth value")
+            return AuthResult(success=False, handled=True)
+
+        return await self.authenticate(
+            server, server.session, server.envelope, "PLAIN",
+            LoginPassword(login, password),
+        )
+
+    async def auth_LOGIN(  # noqa: N802
+        self, server: Any, args: list[str]
+    ) -> AuthResult:
+        """AUTH LOGIN, the older challenge/response form."""
+        if len(args) == 1:
+            login = await server.challenge_auth(server.AuthLoginUsernameChallenge)
+            if login is MISSING:
+                return AuthResult(success=False)
+        else:
+            try:
+                login = b64decode(args[1].encode(), validate=True)
+            except Exception:
+                await server.push("501 5.5.2 Can't decode base64")
+                return AuthResult(success=False, handled=True)
+
+        password = await server.challenge_auth(server.AuthLoginPasswordChallenge)
+        if password is MISSING:
+            return AuthResult(success=False)
+
+        return await self.authenticate(
+            server, server.session, server.envelope, "LOGIN",
+            LoginPassword(login, password),
+        )
 
     async def authenticate(
         self,
@@ -172,7 +238,7 @@ class LightrHandler:
 
         if self.cfg.security.require_tls_for_auth and not _is_secure(session):
             log.warning("refused plaintext auth on an insecure connection")
-            return AuthResult(success=False, handled=True)
+            return AuthResult(success=False, handled=False)
 
         username = auth_data.login.decode("utf-8", "replace")
         password = auth_data.password.decode("utf-8", "replace")
@@ -182,8 +248,13 @@ class LightrHandler:
 
         if result.ok:
             return AuthResult(success=True, auth_data=result.email)
+
         log.info("auth failed for %s: %s", username, result.failure)
-        return AuthResult(success=False, handled=True)
+        # handled=False, emphatically. In aiosmtpd, handled=True means
+        # "I have already sent the response myself" -- and since we send
+        # nothing, aiosmtpd completed the exchange with 235 and accepted
+        # every wrong password.
+        return AuthResult(success=False, handled=False)
 
     # -- delivery -------------------------------------------------------
 
@@ -220,8 +291,17 @@ class LightrHandler:
             routes = await Router(conn).route_all(recipients)
 
         local: list[Route] = []
+        outbound: list[str] = []
         for route in routes:
             if route.rejected:
+                # On submission the sender has proved who they are, so
+                # "not a domain we host" means "send it onward", not
+                # "relay denied". That distinction is the entire point
+                # of having a separate :587 -- without it an
+                # authenticated user cannot mail anyone external.
+                if self.require_auth and route.reason is RejectReason.NOT_LOCAL_DOMAIN:
+                    outbound.append(route.recipient)
+                    continue
                 assert route.reason is not None
                 outcome.rejected.append((route.recipient, route.reason))
             elif route.delivers_locally:
@@ -230,7 +310,15 @@ class LightrHandler:
             else:
                 outcome.forwarded.extend(route.forward_to)
 
+        if outbound:
+            await self._enqueue_outbound(mail_from, outbound, message)
+            outcome.forwarded.extend(outbound)
+
         if not local:
+            # Nothing to hand to Dovecot, but the outcome still matters:
+            # a message rejected outright is exactly what an operator
+            # wants notified, so this path announces too.
+            self._notify(outcome, mail_from=mail_from, message=message)
             return outcome
 
         header_tools.apply(message, analysis, self.cfg.server.hostname)
@@ -256,7 +344,76 @@ class LightrHandler:
         for status in result.failed:
             log.warning("LMTP refused %s: %s %s", status.recipient,
                         status.code, status.message)
+
+        self._notify(outcome, mail_from=mail_from, message=message)
         return outcome
+
+    def _notify(
+        self, outcome: DeliveryOutcome, *, mail_from: str, message: Message
+    ) -> None:
+        """Announce what happened, without blocking on it."""
+        from lightr.webhooks.delivery import Event
+
+        subject = str(message.get("Subject", "") or "")
+        message_id = str(message.get("Message-ID", "") or "")
+
+        if outcome.delivered:
+            self.webhooks.emit(
+                Event.MAIL_RECEIVED,
+                {
+                    "from": mail_from,
+                    "to": outcome.delivered,
+                    "subject": subject,
+                    "message_id": message_id,
+                },
+            )
+        for recipient, reason in outcome.rejected:
+            self.webhooks.emit(
+                Event.MAIL_REJECTED,
+                {
+                    "from": mail_from,
+                    "to": recipient,
+                    "reason": str(reason),
+                    "subject": subject,
+                },
+            )
+
+    async def _enqueue_outbound(
+        self, mail_from: str, recipients: list[str], message: Message
+    ) -> None:
+        """Queue mail for delivery to another server.
+
+        Queued rather than sent inline: a slow or unreachable remote MTA
+        must not hold the submitting client's SMTP session open, and a
+        failure should be retried rather than bounced immediately.
+        """
+        from lightr.mail.queue import Queue
+        from lightr.repo import DomainRepo
+
+        sender_domain = mail_from.split("@", 1)[1] if "@" in mail_from else ""
+
+        async with self.engine.begin() as conn:
+            try:
+                domain = await DomainRepo(conn).resolve(sender_domain)
+            except LookupError:
+                log.warning(
+                    "cannot queue mail from %s: %r is not a domain we host",
+                    mail_from, sender_domain,
+                )
+                return
+
+            body = message.get_body(preferencelist=("plain",))
+            text = body.get_content() if body is not None else ""
+
+            await Queue(conn).enqueue(
+                org_id=domain.org_id,
+                domain_id=domain.id,
+                from_addr=mail_from,
+                to_addrs=recipients,
+                subject=str(message.get("Subject", "") or ""),
+                body=text,
+            )
+        log.info("queued outbound mail from %s to %s", mail_from, ", ".join(recipients))
 
     async def record_bounces(self, raw: bytes) -> int:
         """Parse a bounce and suppress any dead addresses it names.

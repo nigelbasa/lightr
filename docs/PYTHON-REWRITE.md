@@ -2,35 +2,44 @@
 
 ## Status
 
-Phases 0–7 are built and tested; 8–9 are not started. 536 tests pass.
+All nine phases are built. 800 tests pass; ruff clean.
 
 | Phase | State | Notes |
 |---|---|---|
 | 0 Archive | **done** | Go on `archive/go-engine`, tagged `v0.1.0-go-final` |
-| 1 Foundation | **done** | Config, SQLAlchemy Core schema, Alembic, engine |
-| 2 Domain & identity | **done** | Models, repos, bcrypt auth, API keys, no permissions engine yet |
-| 3 Dovecot | **done** | Maildir, LMTP, Sieve generator, IMAP client, config generation |
-| 4 REST API | **partial** | Orgs/domains/accounts/aliases/apikeys + Dovecot passdb. Mailbox and webhook routes not wired |
-| 5 CLI | **done** | Resource groups, `mailbox`, `account passwd`, `dovecot`, uniform `--format` |
-| 6 Inbound SMTP | **partial** | Receive, submission, routing, header injection. SPF/DKIM-verify/DMARC/spam return neutral |
-| 7 Outbound | **partial** | DKIM signing, queue, sender, relay + direct MX. Bounce parsing not built |
-| 8 Integrations | **not started** | Webhooks, backup/export, mbox/maildir import, auth offload |
-| 9 Packaging | **not started** | PyPI wheel, `.deb`, systemd units |
+| 1 Foundation | **done** | Config, SQLAlchemy Core schema, Alembic, async engine |
+| 2 Domain & identity | **done** | Models, repositories, bcrypt auth, API keys |
+| 3 Dovecot | **done** | Maildir, LMTP, Sieve generation + installation, IMAP client, config generation |
+| 4 REST API | **done** | Operator routes, mailbox routes, Dovecot passdb/userdb |
+| 5 CLI | **done** | Resources, `mailbox`, `account passwd`, `dovecot`, `apikey`, `queue`, `suppression` |
+| 6 Inbound SMTP | **done** | Receive, submission, routing, SPF/DKIM/DMARC, spam scoring, bounce ingestion |
+| 7 Outbound | **done** | DKIM signing, queue with retries, sender, relay + direct MX |
+| 8 Integrations | **done** | Webhooks with SSRF protection and emission; bounces and suppression |
+| 9 Packaging | **done** | PyPI wheel, `.deb` via nfpm, systemd unit, CI |
 
-### Known gaps
+### What is deliberately not built
 
-* **Spam scoring returns 0.0** and **SPF/DKIM/DMARC return "none"**. The
-  structure and the header contract with Sieve are fixed, so filling
-  them in does not change the delivery path — but no mail is currently
-  being classified.
-* **No permissions engine.** API keys carry scopes and are enforced;
-  the `permission_policies` / `sudo_sessions` tables are modelled but
-  unused.
-* **The mailbox REST routes are not wired**, though the adapter they
-  need is built and used by the CLI.
-* **Bounces are not parsed**, so the suppression list is never
-  populated automatically.
-* **Encryption-at-rest migration is unanswered** — see section 2.
+* **Auth offload** (LDAP, OAuth2, OIDC, webhook). The `auth_providers`
+  table and the `AuthMode.EXTERNAL` path exist, and an external account
+  **fails closed** rather than falling back to a local hash. The
+  providers themselves are not implemented.
+* **A permissions engine.** API keys carry scopes and those are
+  enforced; the `permission_policies` / `sudo_sessions` tables are
+  modelled but unused.
+* **Backup, export, and mbox/maildir/eml import.**
+* **A doveadm client.** Quota is configured through the userdb
+  response; reading live usage back is not wired.
+* **Webhook management routes.** Delivery, signing, and emission work;
+  creating and editing webhooks over HTTP does not.
+
+### Still undecided
+
+* **What happens to mail encrypted by the Go engine.** Migration 0002
+  deliberately does not drop `encryption_keys` or `encrypted_messages`,
+  because they may hold the only copy. Decide before importing old
+  mail into Dovecot -- see section 2.
+* **Whether `messages` survives as a cache.** It is currently not
+  modelled at all; the mailbox routes read through IMAP.
 
 ---
 

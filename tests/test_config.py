@@ -202,3 +202,47 @@ class TestPathSerialisation:
         original.save(path)
 
         assert Config.load(path).data_dir == original.data_dir
+
+
+class TestExplicitNulls:
+    """An explicit null must survive a save/load cycle.
+
+    `lmtp_socket: null` is how an operator says 'use TCP, not a unix
+    socket'. Excluding nulls on save made that setting silently revert
+    to the default the next time anything wrote the config -- which
+    `lightr dovecot setup` does.
+    """
+
+    def test_a_null_survives_a_round_trip(self, tmp_path: Path) -> None:
+        cfg = Config.model_validate(
+            {"data_dir": str(tmp_path), "dovecot": {"lmtp_socket": None}}
+        )
+        path = tmp_path / "config.yaml"
+        cfg.save(path)
+
+        reloaded = Config.load(path)
+        assert reloaded.dovecot.lmtp_socket is None
+        assert reloaded.dovecot.uses_lmtp_socket is False
+
+    def test_the_null_is_written_not_omitted(self, tmp_path: Path) -> None:
+        cfg = Config.model_validate(
+            {"data_dir": str(tmp_path), "dovecot": {"lmtp_socket": None}}
+        )
+        path = tmp_path / "config.yaml"
+        cfg.save(path)
+
+        assert "lmtp_socket" in path.read_text(encoding="utf-8")
+
+    def test_two_saves_do_not_drift(self, tmp_path: Path) -> None:
+        """Saving a loaded config must produce the same config."""
+        first = Config.model_validate(
+            {"data_dir": str(tmp_path), "dovecot": {"lmtp_socket": None}}
+        )
+        path = tmp_path / "config.yaml"
+        first.save(path)
+
+        second = Config.load(path)
+        second.save(path)
+
+        assert Config.load(path) == second
+        assert Config.load(path).dovecot.lmtp_socket is None

@@ -60,6 +60,7 @@ class Server:
     cfg: Config
     engine: AsyncEngine | None = None
     _controllers: list[object] = field(default_factory=list)
+    _handlers: list[object] = field(default_factory=list)
     _tasks: list[asyncio.Task] = field(default_factory=list)
     _sender: Sender | None = None
     _stopping: asyncio.Event = field(default_factory=asyncio.Event)
@@ -82,19 +83,26 @@ class Server:
         receive_host, receive_port = parse_addr(self.cfg.smtp.addr, 25)
         submit_host, submit_port = parse_addr(self.cfg.smtp.submission_addr, 587)
 
+        receive_handler = LightrHandler(self.cfg, self.engine, require_auth=False)
+        submission_handler = LightrHandler(self.cfg, self.engine, require_auth=True)
+        self._handlers = [receive_handler, submission_handler]
+
         # :25 takes mail from the internet and must never relay.
         receive = Controller(
-            LightrHandler(self.cfg, self.engine, require_auth=False),
+            receive_handler,
             hostname=receive_host,
             port=receive_port,
             ident=f"lightr {self.cfg.server.hostname}",
         )
         # :587 is for authenticated users and may send anywhere.
         submission = Controller(
-            LightrHandler(self.cfg, self.engine, require_auth=True),
+            submission_handler,
             hostname=submit_host,
             port=submit_port,
-            authenticator=None,
+            # No authenticator= here on purpose: aiosmtpd calls that
+            # synchronously and would not await our check. The handler
+            # implements auth_PLAIN / auth_LOGIN instead, which are
+            # awaited. See the comment in mail/smtp.py.
             auth_require_tls=self.cfg.security.require_tls_for_auth,
             ident=f"lightr {self.cfg.server.hostname}",
         )
@@ -166,6 +174,16 @@ class Server:
 
         if self._sender is not None:
             self._sender.stop()
+
+        # In-flight webhook deliveries are fire-and-forget tasks. Give
+        # them a moment to land: dropping them here would silently lose
+        # events on every restart.
+        for handler in self._handlers:
+            emitter = getattr(handler, "webhooks", None)
+            if emitter is not None:
+                with contextlib.suppress(Exception):
+                    await emitter.drain(timeout=5.0)
+        self._handlers.clear()
 
         server = getattr(self, "_uvicorn", None)
         if server is not None:

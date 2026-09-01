@@ -240,8 +240,13 @@ class Config(_Base):
         # mode="python", not "json": JSON mode stringifies Paths with
         # Pydantic's own str(), which on Windows yields backslashes
         # before _stringify ever sees them.
+        #
+        # Nulls are written, not excluded. Dropping them means an
+        # explicit "lmtp_socket: null" -- which is how an operator says
+        # "use TCP, not a unix socket" -- disappears on the next save
+        # and silently reverts to the default on the next load.
         return yaml.safe_dump(
-            _stringify(self.model_dump(mode="python", exclude_none=True)),
+            _stringify(self.model_dump(mode="python")),
             sort_keys=False,
             default_flow_style=False,
         )

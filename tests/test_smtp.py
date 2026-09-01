@@ -76,6 +76,9 @@ async def handler(
     h = LightrHandler(cfg, engine)
     h.lmtp = lmtp  # type: ignore[assignment]
     yield h
+    # Webhook emission is fire-and-forget; without this its tasks
+    # outlive the test's event loop and raise in a worker thread.
+    await h.webhooks.drain()
 
 
 def _raw(subject: str = "Hello", *, spam_header: bool = False) -> bytes:
@@ -302,3 +305,90 @@ class TestAuthentication:
         result = await handler.authenticate(None, None, None, "OAUTHBEARER", None)
         assert not result.success
         assert not result.handled
+
+
+class TestSubmissionRelay:
+    """An authenticated user may mail anyone; :25 may not relay at all.
+
+    That difference is the entire reason for a separate :587.
+    """
+
+    @pytest_asyncio.fixture
+    async def submission(
+        self, cfg: Config, engine: AsyncEngine, world: None, lmtp: FakeLMTP
+    ):
+        h = LightrHandler(cfg, engine, require_auth=True)
+        h.lmtp = lmtp  # type: ignore[assignment]
+        yield h
+        await h.webhooks.drain()
+
+    async def test_external_recipients_are_queued_not_refused(
+        self, submission: LightrHandler, engine: AsyncEngine
+    ) -> None:
+        outcome = await submission.deliver(
+            mail_from="ops@acme.test",
+            recipients=["someone@external.test"],
+            raw=_raw(),
+        )
+
+        assert outcome.ok
+        assert outcome.forwarded == ["someone@external.test"]
+
+        from lightr.mail.queue import Queue
+
+        async with engine.begin() as conn:
+            queued = await Queue(conn).list()
+        assert [q.to_addrs for q in queued] == [["someone@external.test"]]
+
+    async def test_receive_still_refuses_to_relay(
+        self, handler: LightrHandler, engine: AsyncEngine
+    ) -> None:
+        """The check that keeps the server off blocklists."""
+        outcome = await handler.deliver(
+            mail_from="stranger@example.test",
+            recipients=["victim@elsewhere.test"],
+            raw=_raw(),
+        )
+
+        assert outcome.rejected[0][1] is RejectReason.NOT_LOCAL_DOMAIN
+
+        from lightr.mail.queue import Queue
+
+        async with engine.begin() as conn:
+            assert await Queue(conn).list() == []
+
+    async def test_local_recipients_still_go_to_dovecot(
+        self, submission: LightrHandler, lmtp: FakeLMTP
+    ) -> None:
+        outcome = await submission.deliver(
+            mail_from="ops@acme.test", recipients=["team@acme.test"], raw=_raw()
+        )
+        assert outcome.delivered == ["team@acme.test"]
+
+    async def test_a_mixed_message_splits_correctly(
+        self, submission: LightrHandler, lmtp: FakeLMTP, engine: AsyncEngine
+    ) -> None:
+        outcome = await submission.deliver(
+            mail_from="ops@acme.test",
+            recipients=["team@acme.test", "someone@external.test"],
+            raw=_raw(),
+        )
+
+        assert outcome.delivered == ["team@acme.test"]
+        assert outcome.forwarded == ["someone@external.test"]
+
+    async def test_an_unknown_sender_domain_is_not_queued(
+        self, submission: LightrHandler, engine: AsyncEngine
+    ) -> None:
+        """We cannot attribute or sign mail from a domain we do not
+        host, so it is not queued."""
+        await submission.deliver(
+            mail_from="someone@notours.test",
+            recipients=["out@external.test"],
+            raw=_raw(),
+        )
+
+        from lightr.mail.queue import Queue
+
+        async with engine.begin() as conn:
+            assert await Queue(conn).list() == []
