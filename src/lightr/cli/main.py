@@ -143,6 +143,46 @@ def status(
 
 
 @app.command()
+def serve() -> None:
+    """Run the engine: HTTP API, SMTP, submission, and the sender.
+
+    Refuses to start on an out-of-date schema rather than failing
+    later with confusing errors.
+    """
+    import asyncio
+    import logging
+
+    from lightr.db import migrate as migrations
+    from lightr.server import Server, ServerError
+
+    cfg = state.config
+    logging.basicConfig(
+        level=cfg.logging.level.upper(),
+        format="%(asctime)s %(levelname)-7s %(name)s  %(message)s",
+    )
+
+    if not migrations.is_up_to_date(cfg):
+        output.stderr.print(
+            "[red]The database schema is out of date.[/red] Run: lightr migrate"
+        )
+        raise typer.Exit(1)
+
+    if not cfg.dovecot.internal_key:
+        output.warn(
+            "No Dovecot internal key configured -- IMAP logins will fail. "
+            "Run: lightr dovecot setup"
+        )
+
+    try:
+        asyncio.run(Server(cfg).serve_forever())
+    except ServerError as exc:
+        output.stderr.print(f"[red]error[/red] {exc}")
+        raise typer.Exit(1) from None
+    except KeyboardInterrupt:
+        output.info("Stopped.")
+
+
+@app.command()
 def init(
     data_dir: Annotated[Path | None, typer.Option("--data-dir")] = None,
     hostname: Annotated[

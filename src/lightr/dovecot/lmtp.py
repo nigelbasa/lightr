@@ -155,17 +155,30 @@ class LMTPClient:
                 pass
 
     async def _connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        use_socket = self._cfg.uses_lmtp_socket
+        target = (
+            self._cfg.lmtp_socket
+            if use_socket
+            else f"{self._cfg.lmtp_host}:{self._cfg.lmtp_port}"
+        )
+
+        # Unix sockets do not exist on every platform, and asyncio omits
+        # the function entirely rather than raising -- so check before
+        # calling. Without this an AttributeError escapes as an SMTP 500
+        # with a Python traceback in it.
+        if use_socket and not hasattr(asyncio, "open_unix_connection"):
+            raise LMTPError(
+                f"unix sockets are unsupported on this platform, so Dovecot's "
+                f"LMTP socket at {target} cannot be used. Set "
+                f"dovecot.lmtp_socket to null and use lmtp_host/lmtp_port."
+            )
+
         try:
-            if self._cfg.uses_lmtp_socket:
+            if use_socket:
                 assert self._cfg.lmtp_socket is not None
                 return await asyncio.open_unix_connection(str(self._cfg.lmtp_socket))
             return await asyncio.open_connection(self._cfg.lmtp_host, self._cfg.lmtp_port)
-        except (OSError, NotImplementedError) as exc:
-            target = (
-                self._cfg.lmtp_socket
-                if self._cfg.uses_lmtp_socket
-                else f"{self._cfg.lmtp_host}:{self._cfg.lmtp_port}"
-            )
+        except (OSError, NotImplementedError, AttributeError) as exc:
             raise LMTPError(f"cannot reach Dovecot LMTP at {target}: {exc}") from exc
 
     @staticmethod

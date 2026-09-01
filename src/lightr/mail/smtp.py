@@ -134,13 +134,20 @@ class LightrHandler:
                 f"(max {self.cfg.smtp.max_message_bytes} bytes)"
             )
 
-        outcome = await self.deliver(
-            mail_from=envelope.mail_from or "",
-            recipients=list(envelope.rcpt_tos),
-            raw=raw,
-            remote_ip=_peer_ip(session),
-            helo=getattr(session, "host_name", "") or "",
-        )
+        try:
+            outcome = await self.deliver(
+                mail_from=envelope.mail_from or "",
+                recipients=list(envelope.rcpt_tos),
+                raw=raw,
+                remote_ip=_peer_ip(session),
+                helo=getattr(session, "host_name", "") or "",
+            )
+        except Exception:
+            # aiosmtpd would otherwise answer 500 with the exception
+            # text in it, which tells a stranger about our internals and
+            # tells the sender to give up on something retryable.
+            log.exception("unhandled error while accepting mail")
+            return "451 4.3.0 Temporary failure, please retry"
         return outcome.smtp_response()
 
     # -- authentication -------------------------------------------------
