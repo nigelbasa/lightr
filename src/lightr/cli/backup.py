@@ -192,23 +192,18 @@ def restore(
         )
 
     async def _run() -> backups.RestoreReport:
-        maildirs: dict[str, Path] | None = None
-        if include_mail:
-            cfg = state.config
-            maildirs = {
-                email: layout_for(cfg.dovecot.maildir_root, email).root
-                for email in manifest.mail_accounts
-            }
-            for root in maildirs.values():
-                root.mkdir(parents=True, exist_ok=True)
-
         async with db() as conn:
             return await backups.restore(
                 conn,
                 path,
                 current_revision=_revision(),
                 wipe=True,
-                maildirs=maildirs,
+                # The root, not a prebuilt mapping: where each mailbox
+                # goes is read from the accounts the restore just
+                # loaded, so it lands where the backup took it from.
+                maildir_root=(
+                    state.config.dovecot.maildir_root if include_mail else None
+                ),
                 ignore_revision=ignore_revision,
             )
 

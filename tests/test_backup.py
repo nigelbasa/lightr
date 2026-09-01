@@ -250,6 +250,59 @@ class TestMail:
         assert written == {"ops@acme.test": 1}
         assert (destination / "cur" / "1234.M1.host").read_bytes() == b"Subject: hi\n\nbody\n"
 
+    async def test_mail_goes_back_where_the_account_says_it_lives(
+        self, engine: AsyncEngine, seeded: dict, tmp_path: Path, maildir: Path
+    ) -> None:
+        """An account whose mail was moved has maildir_path pointing at
+        where it actually went. A backup reads from there, so a restore
+        has to write back to the same place -- otherwise a recovery
+        quietly puts every mailbox somewhere Dovecot is not looking.
+        """
+        moved = tmp_path / "elsewhere" / "ops"
+        async with engine.begin() as conn:
+            account = await AccountRepo(conn).resolve("ops@acme.test")
+            account.maildir_path = str(moved)
+            await AccountRepo(conn).update(account)
+
+        path = tmp_path / "moved.tar.gz"
+        async with engine.begin() as conn:
+            await backup.create(
+                conn, path, revision="0003", maildirs={"ops@acme.test": maildir}
+            )
+
+        async with engine.begin() as conn:
+            report = await backup.restore(
+                conn,
+                path,
+                current_revision="0003",
+                wipe=True,
+                maildir_root=tmp_path / "default-root",
+            )
+
+        assert report.mail == {"ops@acme.test": 1}
+        assert (moved / "cur" / "1234.M1.host").is_file()
+        assert not (tmp_path / "default-root").exists()
+
+    async def test_mail_falls_back_to_the_computed_layout(
+        self, engine: AsyncEngine, seeded: dict, tmp_path: Path, maildir: Path
+    ) -> None:
+        """An account with no maildir_path set goes where the layout
+        says, which is what a fresh install looks like."""
+        path = tmp_path / "plain.tar.gz"
+        async with engine.begin() as conn:
+            await backup.create(
+                conn, path, revision="0003", maildirs={"ops@acme.test": maildir}
+            )
+
+        root = tmp_path / "restored-root"
+        async with engine.begin() as conn:
+            report = await backup.restore(
+                conn, path, current_revision="0003", wipe=True, maildir_root=root
+            )
+
+        assert report.mail == {"ops@acme.test": 1}
+        assert (root / "acme.test" / "ops" / "cur" / "1234.M1.host").is_file()
+
     async def test_mail_is_left_out_unless_asked_for(
         self, archive: Path
     ) -> None:

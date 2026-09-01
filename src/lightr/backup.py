@@ -405,22 +405,71 @@ def check_revision(manifest: Manifest, current: str | None) -> None:
         )
 
 
+async def maildir_targets(
+    conn: AsyncConnection, emails: list[str], maildir_root: Path
+) -> dict[str, Path]:
+    """Where each address's mail belongs, as this database says.
+
+    ``accounts.maildir_path`` wins over the computed layout, because an
+    account whose mail was moved has that column pointing at where it
+    actually went. A backup reads from there; a restore has to write
+    back to the same place, or a recovery quietly puts every mailbox
+    somewhere Dovecot is not looking.
+    """
+    rows = await conn.execute(
+        select(
+            schema.accounts.c.local_part,
+            schema.accounts.c.maildir_path,
+            schema.domains.c.name.label("domain_name"),
+        ).select_from(schema.accounts.join(schema.domains))
+    )
+    stored = {
+        f"{r.local_part}@{r.domain_name}": r.maildir_path for r in rows
+    }
+
+    from lightr.dovecot.maildir import MaildirError, layout_for
+
+    targets: dict[str, Path] = {}
+    for email in emails:
+        recorded = stored.get(email)
+        if recorded:
+            targets[email] = Path(recorded)
+            continue
+        try:
+            targets[email] = layout_for(maildir_root, email).root
+        except MaildirError:  # pragma: no cover - refused at creation
+            log.warning("cannot place mail for %s; skipping it", email)
+    return targets
+
+
 async def restore(
     conn: AsyncConnection,
     path: Path,
     *,
     current_revision: str | None,
     wipe: bool,
-    maildirs: dict[str, Path] | None = None,
+    maildir_root: Path | None = None,
     ignore_revision: bool = False,
 ) -> RestoreReport:
-    """Load an archive into this database, and optionally its mail."""
+    """Load an archive into this database, and optionally its mail.
+
+    Mail is placed after the rows are loaded, so the destination comes
+    from the restored ``accounts.maildir_path`` -- the same source the
+    backup read from.
+    """
     manifest = read_manifest(path)
     if not ignore_revision:
         check_revision(manifest, current_revision)
 
     tables = await load_database(conn, read_database(path), wipe=wipe)
-    mail = extract_mail(path, maildirs) if maildirs else {}
+
+    mail: dict[str, int] = {}
+    if maildir_root is not None and manifest.mail_accounts:
+        targets = await maildir_targets(conn, manifest.mail_accounts, maildir_root)
+        for root in targets.values():
+            root.mkdir(parents=True, exist_ok=True)
+        mail = extract_mail(path, targets)
+
     return RestoreReport(tables=tables, mail=mail)
 
 
@@ -441,6 +490,7 @@ __all__ = [
     "dump_database",
     "extract_mail",
     "load_database",
+    "maildir_targets",
     "read_database",
     "read_manifest",
     "restore",
