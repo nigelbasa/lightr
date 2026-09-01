@@ -2,7 +2,7 @@
 
 ## Status
 
-All nine phases are built. 800 tests pass; ruff clean.
+All nine phases are built. 864 tests pass; ruff clean.
 
 | Phase | State | Notes |
 |---|---|---|
@@ -27,19 +27,23 @@ All nine phases are built. 800 tests pass; ruff clean.
   enforced; the `permission_policies` / `sudo_sessions` tables are
   modelled but unused.
 * **Backup, export, and mbox/maildir/eml import.**
-* **A doveadm client.** Quota is configured through the userdb
-  response; reading live usage back is not wired.
 * **Webhook management routes.** Delivery, signing, and emission work;
   creating and editing webhooks over HTTP does not.
 
-### Still undecided
+### Decisions, now settled
 
-* **What happens to mail encrypted by the Go engine.** Migration 0002
-  deliberately does not drop `encryption_keys` or `encrypted_messages`,
-  because they may hold the only copy. Decide before importing old
-  mail into Dovecot -- see section 2.
-* **Whether `messages` survives as a cache.** It is currently not
-  modelled at all; the mailbox routes read through IMAP.
+* **Old encrypted mail is not migrated.** Migration 0003 drops
+  `encryption_keys`, `encrypted_messages`, and `messages`. 0002 still
+  preserves them, so an operator can stop there and take a backup
+  before going on.
+* **`messages` is gone.** The mailbox routes and CLI read through IMAP.
+* **Sieve installs via doveadm**, which compiles the script and rejects
+  a broken one up front.
+* **Lightr manages Dovecot fully.** `lightr dovecot install` generates
+  the internal key and master user, writes the configuration and the
+  hashed master-users file, verifies it with `doveconf` before
+  reloading, and rolls back on failure. An operator never edits
+  `dovecot.conf`, hashes a master password, or reloads the service.
 
 ---
 

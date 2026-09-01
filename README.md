@@ -28,7 +28,8 @@ questions without a database client.
 - Outbound queue with retries, bounce handling, suppression
 - Organizations, domains, accounts, aliases, API keys, permissions
 - Webhooks, the REST API, and the CLI
-- **Dovecot's configuration** — `lightr dovecot config` generates it
+- **Dovecot itself** — configuration, master user, Sieve installation,
+  quota reads, and reloads. Lightr drives it via `doveadm`.
 
 ## What Dovecot owns
 
@@ -53,16 +54,22 @@ sudo apt install ./lightr_0.2.0_all.deb
 
 ```bash
 lightr init --hostname mail.example.com
-lightr dovecot setup                    # generate the internal auth key
-lightr dovecot config --write           # write Dovecot's configuration
-systemctl restart dovecot
+lightr dovecot install                  # configures Dovecot completely
 
 lightr domain create example.com
+lightr domain dkim example.com --generate
 lightr domain dns example.com           # records to publish
-lightr account create ops@example.com   # prompts for a password
+lightr domain verify example.com        # check what you published
 
+lightr account create ops@example.com   # prompts for a password
 lightr serve
 ```
+
+`lightr dovecot install` generates the auth key and master user, writes
+Dovecot's configuration, verifies it with Dovecot's own parser, and
+reloads the service. You never edit `dovecot.conf`, hash a master
+password, or restart Dovecot by hand -- Lightr manages it as an
+internal component.
 
 ## The CLI
 
@@ -81,7 +88,11 @@ lightr mailbox search ops@example.com --from billing@ --since 2026-08-01
 lightr mailbox download ops@example.com 4821 --attachment 2 -o invoice.pdf
 
 lightr status
-lightr dovecot check
+lightr dovecot status                          # what Lightr sees of Dovecot
+lightr dovecot quota                           # real usage, as Dovecot measures it
+lightr dovecot sieve ops@example.com           # compile and install filter rules
+lightr queue stats
+lightr suppression check someone@example.com   # why did mail stop?
 ```
 
 `--format table|json|yaml` works on every list and get. Output defaults
@@ -127,10 +138,17 @@ tagged `v0.1.0-go-final`.
 lightr migrate    # adopts an existing database in place
 ```
 
-The schema is shared, so `lightr migrate` adds only what is missing. It
-does **not** drop the old `messages`, `encryption_keys`, or
-`encrypted_messages` tables — those may hold the only copy of data that
-still needs migrating into Dovecot.
+The schema is shared, so `lightr migrate` adds only what is missing.
+
+Migration 0003 **drops** the old `messages`, `encryption_keys`, and
+`encrypted_messages` tables — Dovecot owns the message store now, and
+mail encrypted by the Go engine is not carried over. Migration 0002
+still preserves them, so stop there and take a backup first if any of
+it matters:
+
+```bash
+lightr migrate --revision 0002
+```
 
 Note that IMAP clients will resync from scratch on first connect. The
 Go engine's IMAP server used positional UIDs that shifted on every
