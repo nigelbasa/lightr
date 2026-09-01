@@ -116,6 +116,14 @@ class IMAPProtocol(Protocol):
     async def search(self, folder: str, criteria: str) -> list[int]: ...
     async def fetch_summaries(self, folder: str, uids: list[int]) -> list[MessageSummary]: ...
     async def fetch_raw(self, folder: str, uid: int) -> bytes: ...
+    async def append(
+        self,
+        folder: str,
+        raw: bytes,
+        *,
+        flags: tuple[str, ...] = (),
+        date: datetime | None = None,
+    ) -> None: ...
     async def store_flags(
         self, folder: str, uid: int, flags: list[str], *, add: bool
     ) -> None: ...
@@ -310,6 +318,34 @@ class Mailbox:
         summaries = await self._client.fetch_summaries(folder, [uid])
         flags = summaries[0].flags if summaries else frozenset()
         return parse_message(raw, uid, folder, flags)
+
+    async def raw(self, folder: str, uid: int) -> bytes:
+        """One message exactly as it was delivered.
+
+        Export works from this rather than from a parsed message: a
+        re-serialised MIME tree is not byte-identical to what arrived,
+        and an exported mailbox should be the original mail.
+        """
+        raw = await self._client.fetch_raw(folder, uid)
+        if not raw:
+            raise MessageNotFoundError(uid, folder)
+        return raw
+
+    async def append(
+        self,
+        folder: str,
+        raw: bytes,
+        *,
+        flags: tuple[str, ...] = (),
+        date: datetime | None = None,
+    ) -> None:
+        """Add a message to a folder, keeping its flags and date.
+
+        This is how mail is imported. Writing files into the Maildir
+        directly would leave Dovecot's indexes describing a mailbox
+        that no longer matches what is on disk.
+        """
+        await self._client.append(folder, raw, flags=flags, date=date)
 
     async def attachment(self, folder: str, uid: int, index: int) -> tuple[str, str, bytes]:
         raw = await self._client.fetch_raw(folder, uid)

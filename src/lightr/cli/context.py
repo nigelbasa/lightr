@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, NoReturn, TypeVar
 
 import typer
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -113,12 +113,12 @@ def run(coro_fn: Callable[..., Awaitable[T]], *args: Any, **kwargs: Any) -> T:
     raise AssertionError("unreachable")  # pragma: no cover
 
 
-def fail(message: str) -> None:
+def fail(message: str) -> NoReturn:
     """Print an error and exit non-zero."""
     _fail(message)
 
 
-def _fail(message: str) -> None:
+def _fail(message: str) -> NoReturn:
     output.stderr.print(f"[red]error[/red] {message}")
     raise typer.Exit(1)
 

@@ -230,7 +230,74 @@ lightr queue list --status failed        # what failed to send, and why
 
 ---
 
-## 4. Upgrading
+## 4. Backups
+
+```bash
+lightr backup create /var/backups/lightr/          # database only
+lightr backup create /var/backups/ --include-mail  # and the Maildirs
+lightr backup inspect /var/backups/lightr-backup-20260901-120000.tar.gz
+```
+
+The archive holds every row Lightr owns, unredacted: password hashes,
+DKIM private keys, relay credentials. That is what makes it a working
+backup rather than a decorative one, and it is why the file is written
+`0600`. Treat it as you would the private keys inside it.
+
+Mail is left out unless you ask for it — the database is kilobytes and
+the mail is not. Both halves are worth having, on different schedules.
+
+A nightly database backup, kept for a fortnight:
+
+```bash
+cat >/etc/cron.daily/lightr-backup <<'SH'
+#!/bin/sh
+install -d -m 700 /var/backups/lightr
+lightr backup create /var/backups/lightr/
+find /var/backups/lightr -name 'lightr-backup-*.tar.gz' -mtime +14 -delete
+SH
+chmod +x /etc/cron.daily/lightr-backup
+```
+
+Restoring replaces everything, and asks before it does:
+
+```bash
+lightr backup restore /var/backups/lightr/lightr-backup-20260901-120000.tar.gz
+```
+
+It refuses an archive taken at a different schema revision rather than
+loading half of it. `lightr backup inspect` tells you the revision
+before you try.
+
+**Test a restore before you need one.** A backup nobody has restored
+is a file, not a backup:
+
+```bash
+lightr --config /tmp/test.yaml init --data-dir /tmp/test-restore
+lightr --config /tmp/test.yaml backup restore /var/backups/lightr/<file> --yes
+lightr --config /tmp/test.yaml account list
+```
+
+### Moving mail in from another server
+
+```bash
+lightr mailbox import ops@example.com /var/mail/old/ops.mbox
+lightr mailbox import ops@example.com /home/ops/Maildir      # folders and flags kept
+lightr mailbox import ops@example.com ./exported/ --dry-run  # count first
+```
+
+Messages are appended through IMAP, so Dovecot indexes them as it would
+any delivery. Re-running an import adds the messages again rather than
+replacing them — use `--dry-run` first.
+
+Out again, as mbox, which every other mail tool reads:
+
+```bash
+lightr mailbox export ops@example.com -o ops.mbox
+```
+
+---
+
+## 5. Upgrading
 
 ```bash
 /opt/lightr/bin/pip install --upgrade lightr
@@ -247,7 +314,7 @@ of that data matters, stop at `0002` and back up first:
 
 ```bash
 lightr migrate --revision 0002
-sqlite3 /var/lib/lightr/lightr.db .dump > backup.sql
+lightr backup create /root/before-0003.tar.gz
 lightr migrate
 ```
 

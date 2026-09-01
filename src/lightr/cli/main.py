@@ -15,7 +15,7 @@ import typer
 
 from lightr import __version__
 
-from . import accounts, dovecot, mailbox, operations, output, resources
+from . import accounts, backup, dovecot, mailbox, operations, output, resources
 from .context import db, run, state
 from .output import Format
 
@@ -35,6 +35,7 @@ app.add_typer(dovecot.app, name="dovecot")
 app.add_typer(operations.apikey_app, name="apikey")
 app.add_typer(operations.queue_app, name="queue")
 app.add_typer(operations.suppression_app, name="suppression")
+app.add_typer(backup.app, name="backup")
 
 
 def _version(value: bool) -> None:

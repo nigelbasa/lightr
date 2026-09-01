@@ -8,6 +8,8 @@ a mailbox.
 
 from __future__ import annotations
 
+import sys
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
@@ -20,7 +22,7 @@ from lightr.dovecot.mailbox import (
 )
 
 from . import output
-from .context import confirm, run
+from .context import confirm, fail, run
 from .imap_client import open_mailbox
 from .output import Format
 
@@ -305,4 +307,154 @@ def delete_message(
     run(_run)
     output.success(
         f"Message {uid} {'purged' if purge else 'moved to Trash'}"
+    )
+
+
+# --------------------------------------------------------------------
+# Import and export
+# --------------------------------------------------------------------
+
+
+class _Source(StrEnum):
+    AUTO = "auto"
+    MBOX = "mbox"
+    MAILDIR = "maildir"
+    EML = "eml"
+
+
+def _detect(path: Path) -> _Source:
+    """Work out what a path holds, so --format is rarely needed."""
+    if path.is_dir():
+        return _Source.MAILDIR if (path / "cur").is_dir() else _Source.EML
+    if path.suffix.lower() in (".eml", ".msg", ".mail"):
+        return _Source.EML
+    return _Source.MBOX
+
+
+@app.command("import")
+def import_mail(
+    account: Annotated[str, _ACCOUNT_ARG],
+    path: Annotated[Path, typer.Argument(help="An mbox file, a Maildir, or .eml file(s).")],
+    source: Annotated[
+        _Source, typer.Option("--format", help="Override what the path is taken to be.")
+    ] = _Source.AUTO,
+    folder: Annotated[
+        str | None,
+        typer.Option("--folder", help="Put everything here. A Maildir keeps its own by default."),
+    ] = None,
+    limit: Annotated[
+        int | None, typer.Option("--limit", help="Stop after this many messages.")
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Count what would be imported, and import nothing.")
+    ] = False,
+) -> None:
+    """Import mail into a mailbox.
+
+    Messages are appended through IMAP, so Dovecot indexes them as it
+    would any delivery -- flags and original dates included. Nothing
+    already in the mailbox is touched; re-running an import duplicates
+    the messages rather than replacing them.
+    """
+    from lightr.mailtransfer import (
+        TransferError,
+        read_eml,
+        read_maildir,
+        read_mbox,
+    )
+    from lightr.mailtransfer import import_messages as _import
+
+    kind = _detect(path) if source is _Source.AUTO else source
+
+    def _messages():
+        if kind is _Source.MAILDIR:
+            return read_maildir(path, folder)
+        if kind is _Source.EML:
+            return read_eml(path, folder or "INBOX")
+        return read_mbox(path, folder or "INBOX")
+
+    async def _run():
+        if dry_run:
+            return await _import(_NoMailbox(), _messages(), dry_run=True, limit=limit)
+        async with open_mailbox(account) as mailbox:
+            return await _import(mailbox, _messages(), limit=limit)
+
+    try:
+        report = run(_run)
+    except TransferError as exc:
+        fail(str(exc))
+
+    verb = "Would import" if dry_run else "Imported"
+    output.success(
+        f"{verb} {report.messages} message(s), {output.human_size(report.bytes_moved)}, "
+        f"from {kind} at {path}"
+    )
+    for name, count in sorted(report.folders.items()):
+        output.info(f"  {name}: {count}")
+    for failure in report.failures[:10]:
+        output.warn(failure)
+    if len(report.failures) > 10:
+        output.warn(f"...and {len(report.failures) - 10} more failures")
+
+
+class _NoMailbox:
+    """A destination that accepts nothing, for --dry-run."""
+
+    async def append(self, folder, raw, *, flags=(), date=None) -> None:
+        raise AssertionError("dry run must not append")  # pragma: no cover
+
+
+@app.command("export")
+def export_mail(
+    account: Annotated[str, _ACCOUNT_ARG],
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", "-o", help="Write here instead of stdout."),
+    ] = None,
+    folder: Annotated[
+        str | None,
+        typer.Option("--folder", help="One folder. Every folder is exported by default."),
+    ] = None,
+    limit: Annotated[
+        int, typer.Option("--limit", help="Messages per folder.")
+    ] = 100_000,
+) -> None:
+    """Export a mailbox as mbox.
+
+    mbox because it is what every other mail tool reads. The messages
+    come out byte-for-byte as they were delivered, with mboxrd quoting
+    applied to the From_ lines and nothing else changed.
+    """
+    from lightr.mailtransfer import Message, to_mbox
+
+    async def _run() -> list[bytes]:
+        chunks: list[bytes] = []
+        async with open_mailbox(account) as mailbox:
+            names = (
+                [folder]
+                if folder
+                else [f.name for f in await mailbox.folders()]
+            )
+            for name in names:
+                for summary in await mailbox.list(name, limit=limit):
+                    raw = await mailbox.raw(name, summary.uid)
+                    chunks.extend(
+                        to_mbox([Message(raw=raw, folder=name, date=summary.date)])
+                    )
+        return chunks
+
+    chunks = run(_run)
+    payload = b"".join(chunks)
+
+    if out is None:
+        # Bytes straight to the buffer: Rich would wrap and corrupt it.
+        sys.stdout.buffer.write(payload)
+        sys.stdout.buffer.flush()
+        output.success(f"Exported {len(chunks)} message(s)")
+        return
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(payload)
+    output.success(
+        f"Exported {len(chunks)} message(s) to {out} ({output.human_size(len(payload))})"
     )

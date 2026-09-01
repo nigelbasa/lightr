@@ -241,6 +241,40 @@ class AioIMAPClient:
         await self.store_flags(folder, uid, ["\\Deleted"], add=True)
         await self.expunge(folder, uid)
 
+    async def append(
+        self,
+        folder: str,
+        raw: bytes,
+        *,
+        flags: tuple[str, ...] = (),
+        date: Any = None,
+    ) -> None:
+        """APPEND a message into a folder, creating the folder if needed.
+
+        Importing into a folder the mailbox does not have yet is the
+        normal case -- a Maildir being migrated carries folder names
+        this server has never seen -- so a missing folder is created
+        rather than reported as an error.
+        """
+        client = await self._connect()
+
+        if folder.upper() != "INBOX":
+            # CREATE on an existing folder is a no-op error; ignore it
+            # rather than round-tripping a LIST for every message.
+            await client.create(_quote(folder))
+
+        response = await client.append(
+            raw,
+            mailbox=_quote(folder),
+            flags=" ".join(flags) if flags else None,
+            date=date,
+        )
+        if response.result != "OK":
+            raise MailboxError(
+                f"could not append a message to {folder!r}: "
+                f"{' '.join(_as_lines(response.lines))[:200]}"
+            )
+
     async def expunge(self, folder: str, uid: int) -> None:
         client = await self._ensure_selected(folder)
 
