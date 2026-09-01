@@ -18,6 +18,7 @@ import typer
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from lightr.apikeys import APIKeyError
 from lightr.auth import PasswordError
 from lightr.config import Config
 from lightr.db.engine import create_engine
@@ -96,6 +97,8 @@ def run(coro_fn: Callable[..., Awaitable[T]], *args: Any, **kwargs: Any) -> T:
     except ConflictError as exc:
         _fail(str(exc))
     except PasswordError as exc:
+        _fail(str(exc))
+    except APIKeyError as exc:
         _fail(str(exc))
     except (MailboxError, MaildirError, SieveError) as exc:
         _fail(str(exc))

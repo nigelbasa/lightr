@@ -15,7 +15,7 @@ import typer
 
 from lightr import __version__
 
-from . import accounts, dovecot, mailbox, output, resources
+from . import accounts, dovecot, mailbox, operations, output, resources
 from .context import db, run, state
 from .output import Format
 
@@ -32,6 +32,9 @@ app.add_typer(accounts.app, name="account")
 app.add_typer(resources.alias_app, name="alias")
 app.add_typer(mailbox.app, name="mailbox")
 app.add_typer(dovecot.app, name="dovecot")
+app.add_typer(operations.apikey_app, name="apikey")
+app.add_typer(operations.queue_app, name="queue")
+app.add_typer(operations.suppression_app, name="suppression")
 
 
 def _version(value: bool) -> None:
@@ -231,6 +234,7 @@ def entrypoint() -> None:
     instance. Without this, those surface as a raw traceback, which is
     exactly the behaviour this rewrite is meant to fix.
     """
+    from lightr.apikeys import APIKeyError
     from lightr.auth import PasswordError
     from lightr.dovecot.mailbox import MailboxError
     from lightr.dovecot.maildir import MaildirError
@@ -240,7 +244,7 @@ def entrypoint() -> None:
     # is what would normally translate typer.Exit into a status code.
     try:
         app()
-    except (PasswordError, MailboxError, MaildirError, SieveError) as exc:
+    except (APIKeyError, PasswordError, MailboxError, MaildirError, SieveError) as exc:
         output.stderr.print(f"[red]error[/red] {exc}")
         sys.exit(1)
     except KeyboardInterrupt:  # pragma: no cover - interactive only
