@@ -301,3 +301,187 @@ def delete_alias(
 
     run(_run)
     output.success(f"Deleted alias {found.source}")
+
+
+@domain_app.command("dns")
+def domain_dns(
+    domain: Annotated[str, typer.Argument(help="Domain name or id.")],
+    fmt: Annotated[Format | None, _FORMAT] = None,
+    zone: Annotated[
+        bool, typer.Option("--zone", help="Print as zone-file lines.")
+    ] = False,
+) -> None:
+    """Show the DNS records this domain should publish.
+
+    Lightr never pushes records into a DNS provider -- it tells you
+    what to publish and then verifies what you did.
+    """
+    from lightr.mail.dns_records import records_for
+
+    async def _run() -> tuple[Domain, list]:
+        async with db() as conn:
+            found = await DomainRepo(conn).resolve(domain)
+        return found, records_for(
+            found.name,
+            mail_hostname=found.hostname,
+            dkim_selector=found.dkim_selector or "default",
+            dkim_public_key=_dkim_public_key(found),
+        )
+
+    found, records = run(_run)
+
+    if zone:
+        for record in records:
+            output.raw(record.as_zone_line())
+        return
+
+    output.render(
+        [
+            {
+                "kind": str(r.kind),
+                "name": r.name,
+                "type": r.type,
+                "priority": r.priority,
+                "value": r.value,
+            }
+            for r in records
+        ],
+        [("kind", "RECORD"), ("name", "NAME"), ("type", "TYPE"), ("value", "VALUE")],
+        fmt=fmt,
+        empty="No records to publish.",
+    )
+    if not found.dkim_private_key:
+        output.warn(
+            f"No DKIM key yet. Run: lightr domain dkim {found.name} --generate"
+        )
+    output.info(f"Then check with: lightr domain verify {found.name}")
+
+
+@domain_app.command("verify")
+def domain_verify(
+    domain: Annotated[str, typer.Argument(help="Domain name or id.")],
+    fmt: Annotated[Format | None, _FORMAT] = None,
+) -> None:
+    """Check the domain's live DNS against what Lightr expects."""
+    from lightr.mail.dns_records import verify as verify_dns
+
+    async def _run() -> tuple[Domain, object]:
+        async with db() as conn:
+            found = await DomainRepo(conn).resolve(domain)
+        result = await verify_dns(
+            found.name,
+            mail_hostname=found.hostname,
+            dkim_selector=found.dkim_selector or "default",
+            dkim_public_key=_dkim_public_key(found),
+        )
+        if result.verified and not found.is_verified:
+            async with db() as conn:
+                found.is_verified = True
+                await DomainRepo(conn).update(found)
+        return found, result
+
+    found, result = run(_run)
+
+    output.render(
+        [
+            {
+                "record": str(c.kind),
+                "state": str(c.state),
+                "found": ", ".join(c.found) or None,
+                "detail": c.detail or None,
+            }
+            for c in result.checks
+        ],
+        [("record", "RECORD"), ("state", "STATE"), ("found", "PUBLISHED")],
+        fmt=fmt,
+        empty="Nothing to check.",
+    )
+
+    if result.verified:
+        output.success(f"{found.name} is verified")
+        return
+
+    for failure in result.failures:
+        output.warn(f"{failure.kind}: {failure.state} -- {failure.detail or ''}".strip())
+    output.info(f"See the expected records with: lightr domain dns {found.name}")
+    raise typer.Exit(1)
+
+
+@domain_app.command("dkim")
+def domain_dkim(
+    domain: Annotated[str, typer.Argument(help="Domain name or id.")],
+    generate: Annotated[
+        bool, typer.Option("--generate", help="Generate a new key pair.")
+    ] = False,
+    selector: Annotated[str, typer.Option("--selector")] = "default",
+    bits: Annotated[int, typer.Option("--bits", help="Key size.")] = 2048,
+    yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
+) -> None:
+    """Show or generate this domain's DKIM key."""
+    from lightr.mail.dkim import generate_key
+
+    async def _show() -> Domain:
+        async with db() as conn:
+            return await DomainRepo(conn).resolve(domain)
+
+    found = run(_show)
+
+    if not generate:
+        if not found.dkim_private_key:
+            output.stderr.print(
+                f"[yellow]{found.name} has no DKIM key.[/yellow] "
+                f"Generate one with: lightr domain dkim {found.name} --generate"
+            )
+            raise typer.Exit(1)
+        public = _dkim_public_key(found)
+        output.raw(
+            f'{found.dkim_selector or "default"}._domainkey.{found.name}. '
+            f'IN TXT "v=DKIM1; k=rsa; p={public}"'
+        )
+        return
+
+    if found.dkim_private_key:
+        confirm(
+            f"Replace the DKIM key for {found.name}?",
+            yes=yes,
+            detail=(
+                "[yellow]Mail signed with the old key stops verifying "
+                "until the new record propagates.[/yellow]"
+            ),
+        )
+
+    key = generate_key(selector, bits)
+
+    async def _save() -> None:
+        async with db() as conn:
+            repo = DomainRepo(conn)
+            current = await repo.resolve(domain)
+            current.dkim_private_key = key.private_key_pem
+            current.dkim_selector = selector
+            await repo.update(current)
+
+    run(_save)
+    output.success(f"Generated a {bits}-bit DKIM key for {found.name}")
+    output.info("Publish this record, then run: lightr domain verify " + found.name)
+    output.raw(key.dns_record(found.name))
+
+
+def _dkim_public_key(domain: Domain) -> str | None:
+    """Derive the public key from a stored private key."""
+    if not domain.dkim_private_key:
+        return None
+    try:
+        import base64
+
+        from cryptography.hazmat.primitives import serialization
+
+        private = serialization.load_pem_private_key(
+            domain.dkim_private_key.encode("ascii"), password=None
+        )
+        der = private.public_key().public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        return base64.b64encode(der).decode("ascii")
+    except Exception:
+        return None
