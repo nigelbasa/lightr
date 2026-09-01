@@ -81,7 +81,7 @@ rather than on anything about Lightr.
 git push && git push --tags
 ```
 
-The tag `v0.2.0` already exists locally.
+The tag `v0.3.0` already exists locally.
 
 ---
 

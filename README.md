@@ -48,7 +48,7 @@ pipx install lightr
 Or from a Debian package, which pulls Dovecot in as a dependency:
 
 ```bash
-sudo apt install ./lightr_0.2.0_all.deb
+sudo apt install ./lightr_0.3.0_all.deb
 ```
 
 ## Quick start

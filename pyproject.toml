@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lightr"
-version = "0.2.0"
+version = "0.3.0"
 description = "A lightweight mail engine: SMTP, REST, and operator controls, with Dovecot as the mailbox server."
 readme = "README.md"
 requires-python = ">=3.11"
