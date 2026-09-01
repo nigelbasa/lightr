@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the floor because it is what Debian 12 ships, and the
+        # .deb targets Debian. Testing the floor is the point.
+        python: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev,sqlite,imap]"
+
+      - name: Lint
+        run: ruff check src tests migrations
+
+      - name: Test
+        run: pytest -q
+
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: lightr
+          POSTGRES_DB: lightr
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+        ports: ["5432:5432"]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev,sqlite,postgres]"
+
+      - name: Migrate against Postgres
+        env:
+          LIGHTR_TEST_DSN: postgresql://postgres:lightr@localhost:5432/lightr
+        run: pytest -q tests/test_migrations.py tests/test_db_compat.py
+
+  package:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build the wheel
+        run: |
+          pip install build
+          python -m build
+
+      - name: Check the wheel installs cleanly
+        run: |
+          python -m venv /tmp/check
+          /tmp/check/bin/pip install dist/*.whl
+          /tmp/check/bin/lightr --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

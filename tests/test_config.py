@@ -179,3 +179,26 @@ class TestRoundTrip:
 def test_driver_enum_accepts_yaml_strings() -> None:
     cfg = Config.model_validate({"database": {"driver": "sqlite"}})
     assert cfg.database.driver is DatabaseDriver.SQLITE
+
+
+class TestPathSerialisation:
+    """Lightr runs on Linux; a config must never carry Windows paths."""
+
+    def test_paths_are_written_posix_style(self) -> None:
+        text = Config().to_yaml()
+        assert "\\" not in text
+        assert "/var/lib/lightr" in text
+
+    def test_a_windows_style_path_round_trips_as_posix(self, tmp_path: Path) -> None:
+        cfg = Config(data_dir=tmp_path)
+        path = tmp_path / "config.yaml"
+        cfg.save(path)
+
+        assert "\\" not in path.read_text(encoding="utf-8")
+
+    def test_the_saved_config_still_loads(self, tmp_path: Path) -> None:
+        original = Config(data_dir=tmp_path)
+        path = tmp_path / "config.yaml"
+        original.save(path)
+
+        assert Config.load(path).data_dir == original.data_dir

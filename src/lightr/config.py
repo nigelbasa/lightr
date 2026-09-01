@@ -237,8 +237,11 @@ class Config(_Base):
         target.chmod(0o600)
 
     def to_yaml(self) -> str:
+        # mode="python", not "json": JSON mode stringifies Paths with
+        # Pydantic's own str(), which on Windows yields backslashes
+        # before _stringify ever sees them.
         return yaml.safe_dump(
-            _stringify(self.model_dump(mode="json", exclude_none=True)),
+            _stringify(self.model_dump(mode="python", exclude_none=True)),
             sort_keys=False,
             default_flow_style=False,
         )
@@ -262,11 +265,19 @@ def _drop_retired_keys(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def _stringify(value: Any) -> Any:
-    """Render Paths and enums as plain strings for YAML output."""
+    """Render Paths and enums as plain strings for YAML output.
+
+    Paths are always written POSIX-style. Lightr runs on Linux, so a
+    config written while developing on Windows would otherwise contain
+    ``\\var\\lib\\lightr`` -- a literal filename, not a path, anywhere
+    it was actually used.
+    """
     if isinstance(value, dict):
         return {k: _stringify(v) for k, v in value.items()}
     if isinstance(value, list):
         return [_stringify(v) for v in value]
     if isinstance(value, Path):
+        return value.as_posix()
+    if isinstance(value, StrEnum):
         return str(value)
     return value

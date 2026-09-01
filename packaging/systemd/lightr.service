@@ -1,0 +1,57 @@
+[Unit]
+Description=Lightr mail engine
+Documentation=https://github.com/nigelbasa/lightr
+# Dovecot serves the mailboxes Lightr delivers into. Lightr starts
+# without it and reports 451 on delivery, so this is Wants, not
+# Requires: a Dovecot restart should not take the API down with it.
+Wants=dovecot.service
+After=network-online.target dovecot.service
+Requires=network-online.target
+
+[Service]
+Type=exec
+User=lightr
+Group=lightr
+ExecStart=/usr/bin/lightr --config /etc/lightr/config.yaml serve
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+
+# Binding :25 and :587 needs the capability, not root. Lightr drops
+# nothing itself because it never has more than this.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Shutdown has to outlast the in-flight delivery grace period, or
+# systemd kills the process mid-delivery.
+TimeoutStopSec=45s
+
+# Hardening. The engine reads its config, writes its database and
+# spool, and talks to the network. Nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+ReadWritePaths=/var/lib/lightr /var/log/lightr /var/mail/lightr /run/lightr
+StateDirectory=lightr
+LogsDirectory=lightr
+RuntimeDirectory=lightr
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,66 @@
+# Lightr configuration.
+#
+# Written by `lightr init`. This copy documents the defaults.
+# Paths assume a Debian install; adjust for other layouts.
+#
+# Secrets live here (api.admin_key, dovecot.internal_key,
+# dovecot.master_password), so this file is 0640 root:lightr.
+
+data_dir: /var/lib/lightr
+server:
+  hostname: localhost
+  bind_address: 0.0.0.0
+database:
+  driver: sqlite
+  path: /var/lib/lightr/lightr.db
+  dsn: ''
+http:
+  addr: :8080
+smtp:
+  addr: :25
+  submission_addr: :587
+  max_message_bytes: 26214400
+  max_recipients: 50
+  allow_insecure: false
+dovecot:
+  lmtp_socket: /run/dovecot/lmtp
+  lmtp_host: 127.0.0.1
+  lmtp_port: 24
+  imap_host: 127.0.0.1
+  imap_port: 143
+  imap_use_tls: false
+  imap_pool_size: 8
+  imap_idle_timeout_seconds: 60
+  master_user: ''
+  master_password: ''
+  internal_key: ''
+  doveadm_url: http://127.0.0.1:8080/doveadm/v1
+  doveadm_api_key: ''
+  maildir_root: /var/mail/lightr
+  sieve_dir: /var/lib/lightr/sieve
+dkim:
+  selector: default
+  key_bits: 2048
+api:
+  key: ''
+  admin_key: ''
+tls:
+  cert_file: /var/lib/lightr/tls/server.crt
+  key_file: /var/lib/lightr/tls/server.key
+  domain_certs: {}
+webhook:
+  url: ''
+  enabled: false
+logging:
+  level: info
+  file: /var/log/lightr/lightr.log
+spam:
+  enabled: true
+  suspicious_threshold: 2.0
+  junk_threshold: 4.0
+  dnsbl_zones: []
+  rspamd_url: ''
+  rspamd_password: ''
+  timeout_seconds: 5
+security:
+  require_tls_for_auth: true

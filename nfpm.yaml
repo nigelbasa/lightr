@@ -1,0 +1,76 @@
+# nfpm packaging for the .deb.
+#
+# The package depends on Dovecot: Lightr does not serve IMAP, so an
+# install without it has no mailboxes. dovecot-lua is what the passdb
+# script needs, and is easy to miss because Dovecot starts fine
+# without it and only fails at login time.
+name: lightr
+arch: all
+platform: linux
+version: ${VERSION}
+section: mail
+priority: optional
+maintainer: Nigel Basarokwe
+description: |
+  A lightweight mail engine.
+  SMTP receive, submission and relay, DKIM/SPF/DMARC, an operator REST
+  API and CLI. Mailboxes are served by Dovecot.
+vendor: lightr
+homepage: https://github.com/nigelbasa/lightr
+license: MIT
+
+depends:
+  - python3 (>= 3.11)
+  - python3-venv
+  - dovecot-core
+  - dovecot-imapd
+  - dovecot-lmtpd
+  - dovecot-sieve
+  - dovecot-lua
+recommends:
+  - dovecot-managesieved
+suggests:
+  - postgresql-client
+  - rspamd
+
+contents:
+  - src: ./dist/lightr
+    dst: /usr/bin/lightr
+    file_info:
+      mode: 0755
+
+  # The bundled interpreter. Shipped whole so a system pip install
+  # cannot change what the mail engine runs.
+  - src: ./dist/deb-root/opt/lightr/venv
+    dst: /opt/lightr/venv
+
+  - src: ./packaging/systemd/lightr.service
+    dst: /lib/systemd/system/lightr.service
+
+  - src: ./lightr.yaml.example
+    dst: /usr/share/doc/lightr/config.yaml.example
+
+  - dst: /var/lib/lightr
+    type: dir
+    file_info:
+      mode: 0750
+      owner: lightr
+      group: lightr
+
+  - dst: /var/mail/lightr
+    type: dir
+    file_info:
+      mode: 02770
+      owner: lightr
+      group: lightr
+
+  # Never replaced on upgrade: it holds the admin key and the Dovecot
+  # internal secret, and regenerating either breaks a running install.
+  - src: ./lightr.yaml.example
+    dst: /etc/lightr/config.yaml.example
+    type: config|noreplace
+
+scripts:
+  postinstall: ./packaging/debian/postinst
+  preremove: ./packaging/debian/prerm
+  postremove: ./packaging/debian/postrm

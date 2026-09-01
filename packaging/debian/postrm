@@ -1,0 +1,16 @@
+#!/bin/sh
+# Never deletes mail or the database. Removing a package must not
+# destroy data an operator may still need; purge leaves them too, and
+# says where they are.
+set -e
+case "$1" in
+  purge)
+    echo "Lightr's data has been left in place:"
+    echo "  /var/lib/lightr   database and Sieve scripts"
+    echo "  /var/mail/lightr  mailboxes"
+    echo "  /etc/lightr       configuration"
+    echo "Remove them by hand if you are sure."
+    ;;
+esac
+#DEBHELPER#
+exit 0

@@ -65,6 +65,8 @@ Source = "https://github.com/nigelbasa/lightr"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lightr"]
+# Alembic needs its template and versions alongside the Python.
+artifacts = ["src/lightr/migrations/**/*"]
 
 [tool.ruff]
 line-length = 100

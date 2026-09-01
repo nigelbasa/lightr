@@ -17,10 +17,10 @@ from alembic.script import ScriptDirectory
 
 from lightr.config import Config
 
-# migrations/ sits beside src/ in the source tree, and inside the
-# package data in an installed wheel.
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-MIGRATIONS_DIR = _REPO_ROOT / "migrations"
+# Inside the package, not beside it: a wheel only ships what is under
+# the package directory, and `pip install lightr && lightr migrate`
+# has to work.
+MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
 
 def alembic_config(cfg: Config) -> AlembicConfig:

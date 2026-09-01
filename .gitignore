@@ -59,3 +59,6 @@ docs-site/.next/
 docs-site/node_modules/
 docs-site/out/
 docs-site/public/install.sh
+
+# Packaging output
+dist/

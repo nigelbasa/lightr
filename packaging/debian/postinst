@@ -1,0 +1,52 @@
+#!/bin/sh
+# Post-install for the lightr package.
+set -e
+
+USER=lightr
+GROUP=lightr
+
+case "$1" in
+  configure)
+    if ! getent group "$GROUP" >/dev/null; then
+      addgroup --system "$GROUP"
+    fi
+    if ! getent passwd "$USER" >/dev/null; then
+      adduser --system --ingroup "$GROUP" --no-create-home \
+              --home /var/lib/lightr --shell /usr/sbin/nologin "$USER"
+    fi
+
+    # Dovecot delivers into the Maildir root and reads the Sieve
+    # scripts Lightr writes, so it needs to share the group.
+    if getent passwd dovecot >/dev/null; then
+      adduser dovecot "$GROUP" >/dev/null 2>&1 || true
+    fi
+
+    for dir in /var/lib/lightr /var/log/lightr /var/mail/lightr /var/lib/lightr/sieve; do
+      mkdir -p "$dir"
+      chown "$USER:$GROUP" "$dir"
+    done
+    chmod 750 /var/lib/lightr /var/log/lightr
+    chmod 2770 /var/mail/lightr /var/lib/lightr/sieve
+
+    mkdir -p /etc/lightr
+    if [ ! -f /etc/lightr/config.yaml ]; then
+      lightr --config /etc/lightr/config.yaml init >/dev/null 2>&1 || true
+      lightr --config /etc/lightr/config.yaml dovecot setup >/dev/null 2>&1 || true
+    else
+      # Existing install: bring the schema up to date. Safe to repeat.
+      lightr --config /etc/lightr/config.yaml migrate >/dev/null 2>&1 || true
+    fi
+
+    # The config holds the API admin key and the Dovecot internal key.
+    chown root:"$GROUP" /etc/lightr/config.yaml 2>/dev/null || true
+    chmod 640 /etc/lightr/config.yaml 2>/dev/null || true
+
+    echo "Lightr installed. Next steps:"
+    echo "  lightr dovecot config --write   # generate Dovecot's configuration"
+    echo "  systemctl restart dovecot"
+    echo "  systemctl enable --now lightr"
+    ;;
+esac
+
+#DEBHELPER#
+exit 0
