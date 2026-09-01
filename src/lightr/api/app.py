@@ -25,6 +25,7 @@ from starlette.routing import Route
 from lightr import __version__
 from lightr.api.auth import AuthError, Principal, authenticate
 from lightr.api.internal import INTERNAL_PATHS, INTERNAL_ROUTES
+from lightr.api.mailbox import MAILBOX_ROUTES
 from lightr.apikeys import APIKeyError, APIKeyRepo, KeyType, Permission
 from lightr.config import Config
 from lightr.db.engine import create_engine, ping
@@ -413,6 +414,7 @@ ROUTES: list[Route] = [
     Route("/v1/apikeys/{id}", delete_api_key, methods=["DELETE"]),
 ]
 
+ROUTES.extend(MAILBOX_ROUTES)
 ROUTES.extend(INTERNAL_ROUTES)
 
 #: Paths the API-key middleware does not guard. /health is public;

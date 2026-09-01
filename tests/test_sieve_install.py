@@ -121,7 +121,7 @@ class TestAtomicWrite:
         def boom(*args: object, **kwargs: object) -> None:
             raise OSError("disk full")
 
-        monkeypatch.setattr("os.replace", boom)
+        monkeypatch.setattr("pathlib.Path.replace", boom)
 
         with pytest.raises(OSError, match="disk full"):
             write_script(target, "# replacement\n")
