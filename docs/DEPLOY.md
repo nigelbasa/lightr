@@ -37,13 +37,38 @@ Put the token in `~/.pypirc`, owner-readable only:
 chmod 600 ~/.pypirc
 ```
 
-**The name `lightr` may already be taken.** Check
-<https://pypi.org/project/lightr/> before you build. If it is, change
-`name` in `pyproject.toml` (`lightr-mail` is the obvious fallback) —
-the import name stays `lightr` either way, so only the install command
-changes.
+**Check the name is free before you build.** Use the JSON API, not the
+project page: `pypi.org/project/<name>/` answers 200 for names that do
+not exist, so it will tell you every name is taken.
+
+```powershell
+try { Invoke-WebRequest "https://pypi.org/pypi/lightr/json" -UseBasicParsing -EA Stop; "taken" }
+catch { "available ($($_.Exception.Response.StatusCode.value__))" }
+```
+
+404 means it is yours to claim. If it is taken, change `name` in
+`pyproject.toml` (`lightr-mail` is the obvious fallback) — the import
+name stays `lightr` either way, so only the install command changes.
 
 ### Every release
+
+### From Windows
+
+`twine` reads credentials from the environment, so the token never has
+to go in a file:
+
+```powershell
+$env:TWINE_USERNAME = "__token__"
+$env:TWINE_PASSWORD = "pypi-AgEIcHlwaS5vcmc..."   # paste yours
+
+python -m twine upload --repository-url https://test.pypi.org/legacy/ dist/*
+python -m twine upload dist/*
+```
+
+The variables live only in that shell session. Close it when you are
+done, and revoke the token if it has been anywhere it should not.
+
+### From a Unix shell
 
 ```bash
 # 1. Version. It must not already exist on PyPI; a version can never
