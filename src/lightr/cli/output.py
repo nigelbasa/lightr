@@ -171,13 +171,20 @@ def info(message: str) -> None:
     stderr.print(f"[dim]{message}[/dim]")
 
 
-def secret(label: str, value: str) -> None:
-    """Print a secret once, to stdout, with the caveat on stderr.
+def secret(label: str, value: str, *, recoverable: bool = False) -> None:
+    """Print a secret to stdout, with the caveat on stderr.
 
     stdout so it can be captured; the warning on stderr so capturing it
     does not swallow the caveat.
+
+    ``recoverable`` says whether it can be read back later. An API key
+    cannot -- only its hash is stored. A webhook signing secret can,
+    because HMAC needs the secret itself, and telling an operator
+    otherwise would have them rotate a key they could simply have
+    looked up.
     """
-    stderr.print(f"[yellow]{label} -- shown once, not recoverable:[/yellow]")
+    caveat = "keep it safe" if recoverable else "shown once, not recoverable"
+    stderr.print(f"[yellow]{label} -- {caveat}:[/yellow]")
     stdout.print(value)
 
 

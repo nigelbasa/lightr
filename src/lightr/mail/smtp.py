@@ -86,7 +86,7 @@ class LightrHandler:
 
         # Fire-and-forget: a slow webhook receiver must not slow down
         # or fail mail delivery.
-        self.webhooks = Emitter(engine)
+        self.webhooks = Emitter(engine, allow_private=cfg.webhook.allow_private)
 
     # -- envelope phases ------------------------------------------------
 

@@ -104,12 +104,12 @@ def resolve_all(host: str, port: int) -> list[str]:
     return list(dict.fromkeys(info[4][0] for info in infos))
 
 
-def vet(url: str, *, allow_private: bool = False) -> VettedTarget:
-    """Check a webhook URL and pin it to a safe address.
+def check_url(url: str) -> tuple[str, str, int]:
+    """The checks that need no DNS: scheme, host, credentials, port.
 
-    ``allow_private`` exists for operators whose webhook target really
-    is on the local network. It is off by default because the safe
-    default matters more than the convenient one.
+    Split out so a URL can be validated when a webhook is *registered*,
+    where a name that does not resolve yet is a normal thing and a
+    scheme of ``file://`` never is. Returns (scheme, host, port).
     """
     parsed = urlparse(url.strip())
 
@@ -131,9 +131,21 @@ def vet(url: str, *, allow_private: bool = False) -> VettedTarget:
             f"{', '.join(str(p) for p in sorted(ALLOWED_PORTS))}"
         )
 
-    addresses = resolve_all(parsed.hostname, port)
+    return parsed.scheme, parsed.hostname, port
+
+
+def vet(url: str, *, allow_private: bool = False) -> VettedTarget:
+    """Check a webhook URL and pin it to a safe address.
+
+    ``allow_private`` exists for operators whose webhook target really
+    is on the local network. It is off by default because the safe
+    default matters more than the convenient one.
+    """
+    _, host, port = check_url(url)
+
+    addresses = resolve_all(host, port)
     if not addresses:
-        raise SSRFError(f"{parsed.hostname} did not resolve to any address")
+        raise SSRFError(f"{host} did not resolve to any address")
 
     if not allow_private:
         # Every address must be safe, not just the first. A host that
@@ -142,13 +154,13 @@ def vet(url: str, *, allow_private: bool = False) -> VettedTarget:
         blocked = [a for a in addresses if is_blocked(a)]
         if blocked:
             raise SSRFError(
-                f"{parsed.hostname} resolves to a private or reserved "
-                f"address ({blocked[0]}), which webhooks may not reach"
+                f"{host} resolves to a private or reserved address "
+                f"({blocked[0]}), which webhooks may not reach"
             )
 
     return VettedTarget(
         url=url.strip(),
-        host=parsed.hostname,
+        host=host,
         address=addresses[0],
         port=port,
     )
@@ -160,6 +172,7 @@ __all__ = [
     "BLOCKED_NETWORKS",
     "SSRFError",
     "VettedTarget",
+    "check_url",
     "is_blocked",
     "resolve_all",
     "vet",

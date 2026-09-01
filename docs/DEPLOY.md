@@ -228,6 +228,33 @@ lightr suppression check them@example.com # why did mail to them stop?
 lightr queue list --status failed        # what failed to send, and why
 ```
 
+### Webhooks
+
+```bash
+lightr webhook events                       # what you can subscribe to
+lightr webhook create billing https://api.example.com/hooks/lightr   --event mail.delivered --event mail.bounced
+lightr webhook test billing                 # fire a ping, report what came back
+lightr webhook deliveries billing           # recent attempts, newest first
+```
+
+Every payload is signed: `X-Lightr-Signature` is
+`sha256=HMAC(secret, timestamp + "." + body)`, with the timestamp in
+`X-Lightr-Timestamp`. Signing both together is what stops a captured
+request being replayed; reject anything more than five minutes old.
+`lightr webhook secret <name>` prints the secret, and
+`lightr.webhooks.delivery.verify` is the reference implementation to
+test a receiver against.
+
+A webhook URL is chosen by a tenant and fetched by the server, so
+private and link-local addresses are refused — otherwise it is a way to
+make Lightr read the cloud metadata endpoint on someone's behalf. If
+your receiver genuinely is on this network, set:
+
+```yaml
+webhook:
+  allow_private: true
+```
+
 ---
 
 ## 4. Backups

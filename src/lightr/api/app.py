@@ -61,7 +61,7 @@ def dump(record: Any) -> dict[str, Any]:
     data = record.model_dump()
     # Credentials never cross the wire, in either direction.
     for field in ("password_hash", "dkim_private_key", "relay_password",
-                  "auth_webhook_secret", "key_hash"):
+                  "auth_webhook_secret", "key_hash", "secret", "auth_value"):
         if data.get(field):
             data[field] = "(set)"
     return data
@@ -382,6 +382,184 @@ async def delete_api_key(request: Request) -> Response:
 
 
 # --------------------------------------------------------------------
+# Webhooks
+# --------------------------------------------------------------------
+
+
+def dump_webhook(hook: Any) -> dict[str, Any]:
+    """A webhook as JSON, without its signing secret.
+
+    The secret is stored in the clear because HMAC needs it, which is
+    exactly why it must not be handed back over the wire: a read-scoped
+    key would otherwise be able to forge every event this server sends.
+    """
+    return {
+        "id": str(hook.id),
+        "name": hook.name,
+        "description": hook.description,
+        "url": hook.url,
+        "events": list(hook.events),
+        "active": hook.active,
+        "organization_id": str(hook.organization_id) if hook.organization_id else None,
+        "domain_filter": hook.domain_filter,
+        "timeout": hook.timeout,
+        "max_retries": hook.max_retries,
+        "secret": "(set)" if hook.secret else None,
+        "failure_count": hook.failure_count,
+        "last_success": hook.last_success,
+        "last_failure": hook.last_failure,
+        "created_at": hook.created_at,
+        "updated_at": hook.updated_at,
+    }
+
+
+async def _reachable_webhook(request: Request, ref: str) -> Any:
+    """Resolve a webhook this principal is allowed to touch."""
+    from lightr.webhooks.delivery import WebhookRepo
+
+    principal: Principal = request.state.principal
+    hook = await WebhookRepo(request.state.conn).resolve(ref)
+
+    if principal.is_admin:
+        return hook
+    # A webhook with no organization is the operator's, not a tenant's.
+    if hook.organization_id is None or hook.organization_id != principal.key.organization_id:
+        raise AuthError(403, "this key cannot reach that webhook")
+    return hook
+
+
+async def list_webhooks(request: Request) -> Response:
+    from lightr.webhooks.delivery import WebhookRepo
+
+    principal: Principal = request.state.principal
+    principal.require(Permission.READ)
+
+    hooks = await WebhookRepo(request.state.conn).list(org_id=principal.scoped_org())
+    if not principal.is_admin:
+        # `list` includes org-less webhooks so delivery sees them; a
+        # tenant must not.
+        hooks = [h for h in hooks if h.organization_id is not None]
+    return ok([dump_webhook(h) for h in hooks])
+
+
+async def create_webhook(request: Request) -> Response:
+    from lightr.webhooks.delivery import WebhookRepo
+
+    principal: Principal = request.state.principal
+    principal.require(Permission.WRITE)
+    body = await parse_body(request)
+    require(body, "name", "url")
+
+    conn = request.state.conn
+    organization_id = principal.scoped_org()
+    if organization_id is None and (org_ref := body.get("org_id")):
+        organization_id = (await OrganizationRepo(conn).resolve(str(org_ref))).id
+
+    hook = await WebhookRepo(conn).create(
+        str(body["name"]),
+        str(body["url"]),
+        events=body.get("events"),
+        secret=body.get("secret"),
+        organization_id=organization_id,
+        description=body.get("description"),
+        domain_filter=body.get("domain_filter"),
+        timeout=int(body.get("timeout", 30)),
+        max_retries=int(body.get("max_retries", 5)),
+    )
+    # The only response that carries the secret. A receiver cannot
+    # verify anything without it, and it is not shown again.
+    return ok({**dump_webhook(hook), "secret": hook.secret}, 201)
+
+
+async def get_webhook(request: Request) -> Response:
+    principal: Principal = request.state.principal
+    principal.require(Permission.READ)
+    return ok(dump_webhook(await _reachable_webhook(request, request.path_params["id"])))
+
+
+async def update_webhook(request: Request) -> Response:
+    from lightr.webhooks.delivery import WebhookRepo
+
+    principal: Principal = request.state.principal
+    principal.require(Permission.WRITE)
+    hook = await _reachable_webhook(request, request.path_params["id"])
+    body = await parse_body(request)
+
+    repo = WebhookRepo(request.state.conn)
+    await repo.update(hook.id, **body)
+    return ok(dump_webhook(await repo.resolve(str(hook.id))))
+
+
+async def delete_webhook(request: Request) -> Response:
+    from lightr.webhooks.delivery import WebhookRepo
+
+    principal: Principal = request.state.principal
+    principal.require(Permission.WRITE)
+    hook = await _reachable_webhook(request, request.path_params["id"])
+    await WebhookRepo(request.state.conn).delete(hook.id)
+    return Response(status_code=204)
+
+
+async def rotate_webhook_secret(request: Request) -> Response:
+    from lightr.webhooks.delivery import WebhookRepo
+
+    principal: Principal = request.state.principal
+    principal.require(Permission.WRITE)
+    hook = await _reachable_webhook(request, request.path_params["id"])
+    secret = await WebhookRepo(request.state.conn).rotate_secret(hook.id)
+    return ok({"id": str(hook.id), "secret": secret})
+
+
+async def test_webhook(request: Request) -> Response:
+    """Send a ping and report exactly what the receiver said.
+
+    This is the command that turns "I configured a webhook" into "the
+    webhook works", and it exercises the real path -- SSRF vetting,
+    signing, timeouts -- rather than a simulation of it.
+    """
+    from lightr.webhooks.delivery import WebhookDeliverer, WebhookRepo
+
+    principal: Principal = request.state.principal
+    principal.require(Permission.WRITE)
+    hook = await _reachable_webhook(request, request.path_params["id"])
+
+    cfg: Config = request.app.state.config
+    deliverer = WebhookDeliverer(allow_private=cfg.webhook.allow_private)
+    attempt = await deliverer.deliver(
+        hook, "ping", {"webhook": hook.name, "message": "This is a test from Lightr."}
+    )
+    await WebhookRepo(request.state.conn).record(hook.id, "ping", {}, attempt)
+
+    return ok(
+        {
+            "ok": attempt.ok,
+            "status_code": attempt.status_code,
+            "duration_ms": attempt.duration_ms,
+            "error": attempt.error or None,
+            "body": attempt.body or None,
+        },
+        200 if attempt.ok else 502,
+    )
+
+
+async def list_webhook_deliveries(request: Request) -> Response:
+    from lightr.webhooks.delivery import WebhookRepo
+
+    principal: Principal = request.state.principal
+    principal.require(Permission.READ)
+    hook = await _reachable_webhook(request, request.path_params["id"])
+
+    repo = WebhookRepo(request.state.conn)
+    limit = min(int(request.query_params.get("limit", 50)), 500)
+    return ok(
+        {
+            "stats": await repo.stats(hook.id),
+            "deliveries": await repo.deliveries(hook.id, limit=limit),
+        }
+    )
+
+
+# --------------------------------------------------------------------
 # Route table
 # --------------------------------------------------------------------
 
@@ -412,6 +590,15 @@ ROUTES: list[Route] = [
     Route("/v1/apikeys/{id}/revoke", revoke_api_key, methods=["POST"]),
     Route("/v1/apikeys/{id}/rotate", rotate_api_key, methods=["POST"]),
     Route("/v1/apikeys/{id}", delete_api_key, methods=["DELETE"]),
+
+    Route("/v1/webhooks", list_webhooks, methods=["GET"]),
+    Route("/v1/webhooks", create_webhook, methods=["POST"]),
+    Route("/v1/webhooks/{id}", get_webhook, methods=["GET"]),
+    Route("/v1/webhooks/{id}", update_webhook, methods=["PATCH"]),
+    Route("/v1/webhooks/{id}", delete_webhook, methods=["DELETE"]),
+    Route("/v1/webhooks/{id}/test", test_webhook, methods=["POST"]),
+    Route("/v1/webhooks/{id}/rotate", rotate_webhook_secret, methods=["POST"]),
+    Route("/v1/webhooks/{id}/deliveries", list_webhook_deliveries, methods=["GET"]),
 ]
 
 ROUTES.extend(MAILBOX_ROUTES)

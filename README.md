@@ -92,6 +92,10 @@ lightr mailbox read ops@example.com 4821
 lightr mailbox search ops@example.com --from billing@ --since 2026-08-01
 lightr mailbox download ops@example.com 4821 --attachment 2 -o invoice.pdf
 
+lightr webhook create billing https://api.example.com/hooks/lightr
+lightr webhook test billing                    # does the receiver accept it?
+lightr webhook deliveries billing              # did they get it?
+
 lightr backup create /var/backups/lightr/      # everything Lightr owns
 lightr mailbox import ops@example.com old.mbox # mbox, Maildir, or .eml
 lightr mailbox export ops@example.com -o ops.mbox
@@ -120,6 +124,12 @@ curl -H "X-API-Key: $KEY" https://mail.example.com/v1/domains
 Keys are scoped to an organization, a domain, or a single account, and
 a scoped key cannot read another tenant's data. `Authorization: Bearer`
 works too.
+
+Webhooks are managed over the same API — `/v1/webhooks`, with `test`,
+`rotate`, and `deliveries` subroutes. A signing secret is returned once
+on creation and masked everywhere else: it is stored in the clear
+because HMAC needs it, which is exactly why handing it back over the
+wire would let the holder forge every event the server sends.
 
 ## Configuration
 

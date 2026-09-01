@@ -17,17 +17,18 @@ import hashlib
 import hmac
 import json
 import logging
+import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from lightr.db import schema
-from lightr.webhooks.ssrf import SSRFError, vet
+from lightr.webhooks.ssrf import SSRFError, check_url, vet
 
 log = logging.getLogger("lightr.webhooks")
 
@@ -140,6 +141,12 @@ class Webhook:
     timeout: int = 30
     organization_id: UUID | None = None
     domain_filter: str | None = None
+    description: str | None = None
+    failure_count: int = 0
+    last_success: datetime | None = None
+    last_failure: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
     def wants(self, event: Event | str) -> bool:
         if not self.active:
@@ -213,6 +220,28 @@ class WebhookDeliverer:
             body=response.text[:500],
             duration_ms=elapsed,
         )
+
+
+#: What an operator may subscribe to. "*" means every event, including
+#: ones added later.
+VALID_EVENTS = frozenset({str(e) for e in Event}) | {"*"}
+
+
+def validate_events(events: list[str] | None) -> list[str]:
+    """Check an event subscription, or default it to everything.
+
+    Strict on purpose: a typo in an event name would otherwise be a
+    webhook that is configured, looks healthy, and never fires.
+    """
+    if not events:
+        return ["*"]
+    unknown = [e for e in events if e not in VALID_EVENTS]
+    if unknown:
+        raise ValueError(
+            f"unknown event(s): {', '.join(unknown)}. Valid events are "
+            f"{', '.join(sorted(VALID_EVENTS))}"
+        )
+    return list(dict.fromkeys(events))
 
 
 def next_retry_at(attempts: int, *, now: datetime | None = None) -> datetime:
@@ -290,9 +319,170 @@ class WebhookRepo:
         )
         return event_id
 
-    async def stats(self, webhook_id: UUID) -> dict[str, int]:
-        from sqlalchemy import func
+    # -- management -------------------------------------------------------
 
+    async def create(
+        self,
+        name: str,
+        url: str,
+        *,
+        events: list[str] | None = None,
+        secret: str | None = None,
+        organization_id: UUID | None = None,
+        description: str | None = None,
+        domain_filter: str | None = None,
+        timeout: int = 30,
+        max_retries: int = 5,
+        active: bool = True,
+    ) -> Webhook:
+        """Register an endpoint, generating a signing secret if needed.
+
+        The URL's scheme, host, and port are checked here so a mistake
+        is reported when it is made rather than at the first event.
+        Resolution is deliberately *not* checked: a receiver that is
+        not in DNS yet is an ordinary state, and the delivery path
+        vets the address again anyway.
+        """
+        check_url(url)
+        chosen = validate_events(events)
+
+        # A receiver that cannot verify a signature has no way to tell a
+        # real event from anything else that can reach its URL, so a
+        # webhook without a secret gets one rather than going unsigned.
+        signing_secret = secret or secrets.token_urlsafe(32)
+        now = datetime.now(UTC).replace(tzinfo=None)
+        webhook = Webhook(
+            id=uuid4(),
+            name=name,
+            url=url.strip(),
+            secret=signing_secret,
+            events=chosen,
+            active=active,
+            max_retries=max_retries,
+            timeout=timeout,
+            organization_id=organization_id,
+            domain_filter=domain_filter,
+            description=description,
+            created_at=now,
+            updated_at=now,
+        )
+
+        await self._conn.execute(
+            insert(schema.webhooks).values(
+                id=str(webhook.id),
+                name=webhook.name,
+                description=description,
+                url=webhook.url,
+                method="POST",
+                secret=signing_secret,
+                auth_type="none",
+                events=json.dumps(chosen),
+                organization_id=str(organization_id) if organization_id else None,
+                domain_filter=domain_filter,
+                max_retries=max_retries,
+                timeout=timeout,
+                active=active,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        return webhook
+
+    async def list(
+        self, *, org_id: UUID | None = None, limit: int = 100
+    ) -> list[Webhook]:
+        stmt = (
+            select(schema.webhooks).order_by(schema.webhooks.c.name).limit(limit)
+        )
+        if org_id is not None:
+            stmt = stmt.where(
+                (schema.webhooks.c.organization_id == str(org_id))
+                | (schema.webhooks.c.organization_id.is_(None))
+            )
+        rows = await self._conn.execute(stmt)
+        return [_to_model(r._mapping) for r in rows]
+
+    async def resolve(self, ref: str) -> Webhook:
+        """Find a webhook by id or name.
+
+        Name as well as id, because every other object in this engine
+        is addressable by the thing a human wrote down.
+        """
+        from lightr.repo import AmbiguousReferenceError, NotFoundError, _as_uuid
+
+        table = schema.webhooks
+        if (as_uuid := _as_uuid(ref)) is not None:
+            row = (
+                await self._conn.execute(select(table).where(table.c.id == str(as_uuid)))
+            ).first()
+            if row is None:
+                raise NotFoundError("webhook", ref)
+            return _to_model(row._mapping)
+
+        rows = (
+            await self._conn.execute(select(table).where(table.c.name == ref))
+        ).fetchall()
+        if not rows:
+            raise NotFoundError("webhook", ref, "try `lightr webhook list`")
+        if len(rows) > 1:
+            raise AmbiguousReferenceError(
+                "webhook", ref, [str(r._mapping["id"]) for r in rows]
+            )
+        return _to_model(rows[0]._mapping)
+
+    async def update(self, webhook_id: UUID, **values: Any) -> None:
+        """Change a webhook. Only the fields given are touched."""
+        if values.get("url"):
+            check_url(values["url"])
+        if "events" in values:
+            values["events"] = json.dumps(validate_events(values["events"]))
+
+        allowed = {
+            "name", "description", "url", "secret", "events", "domain_filter",
+            "max_retries", "timeout", "active",
+        }
+        changes = {k: v for k, v in values.items() if k in allowed}
+        if not changes:
+            return
+
+        await self._conn.execute(
+            update(schema.webhooks)
+            .where(schema.webhooks.c.id == str(webhook_id))
+            .values(**changes, updated_at=datetime.now(UTC).replace(tzinfo=None))
+        )
+
+    async def rotate_secret(self, webhook_id: UUID) -> str:
+        secret = secrets.token_urlsafe(32)
+        await self.update(webhook_id, secret=secret)
+        return secret
+
+    async def delete(self, webhook_id: UUID) -> None:
+        await self._conn.execute(
+            delete(schema.webhook_events).where(
+                schema.webhook_events.c.webhook_id == str(webhook_id)
+            )
+        )
+        await self._conn.execute(
+            delete(schema.webhooks).where(schema.webhooks.c.id == str(webhook_id))
+        )
+
+    async def deliveries(
+        self, webhook_id: UUID, *, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """The recent delivery log, newest first.
+
+        This is the answer to "did they get it?", which is the only
+        question anyone asks about a webhook.
+        """
+        rows = await self._conn.execute(
+            select(schema.webhook_events)
+            .where(schema.webhook_events.c.webhook_id == str(webhook_id))
+            .order_by(schema.webhook_events.c.created_at.desc())
+            .limit(limit)
+        )
+        return [dict(r._mapping) for r in rows]
+
+    async def stats(self, webhook_id: UUID) -> dict[str, int]:
         rows = await self._conn.execute(
             select(schema.webhook_events.c.status, func.count())
             .where(schema.webhook_events.c.webhook_id == str(webhook_id))
@@ -322,6 +512,12 @@ def _to_model(mapping: Any) -> Webhook:
             UUID(data["organization_id"]) if data.get("organization_id") else None
         ),
         domain_filter=data.get("domain_filter"),
+        description=data.get("description"),
+        failure_count=int(data.get("failure_count") or 0),
+        last_success=data.get("last_success"),
+        last_failure=data.get("last_failure"),
+        created_at=data.get("created_at"),
+        updated_at=data.get("updated_at"),
     )
 
 
@@ -331,6 +527,7 @@ __all__ = [
     "SIGNATURE_HEADER",
     "SIGNATURE_TOLERANCE",
     "TIMESTAMP_HEADER",
+    "VALID_EVENTS",
     "Attempt",
     "DeliveryStatus",
     "Event",
@@ -339,5 +536,6 @@ __all__ = [
     "WebhookRepo",
     "next_retry_at",
     "sign",
+    "validate_events",
     "verify",
 ]

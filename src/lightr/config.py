@@ -148,6 +148,12 @@ class WebhookConfig(_Base):
     url: str = ""
     enabled: bool = False
 
+    # Off by default: a webhook URL is chosen by a tenant and fetched
+    # by the server, so allowing private addresses turns it into a
+    # request-forgery primitive. Turn it on only when the receiver
+    # really is on this network.
+    allow_private: bool = False
+
 
 class LoggingConfig(_Base):
     level: str = "info"
