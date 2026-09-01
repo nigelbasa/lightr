@@ -4,6 +4,6 @@ SMTP receive, submission and relay; DKIM, SPF and DMARC; an operator
 REST API and CLI. Mailboxes are served by Dovecot.
 """
 
-__version__ = "0.2.0.dev0"
+__version__ = "0.2.0"
 
 __all__ = ["__version__"]

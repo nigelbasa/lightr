@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lightr"
-version = "0.2.0.dev0"
+version = "0.2.0"
 description = "A lightweight mail engine: SMTP, REST, and operator controls, with Dovecot as the mailbox server."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -62,6 +62,21 @@ lightr = "lightr.cli.main:entrypoint"
 Homepage = "https://github.com/nigelbasa/lightr"
 Documentation = "https://lightr.nigelbasa.tech"
 Source = "https://github.com/nigelbasa/lightr"
+
+[tool.hatch.build.targets.sdist]
+# An sdist is for building the package, not for shipping the whole
+# repository. docs-site is a 21 MB Next.js app that no build needs.
+include = [
+  "src/lightr",
+  "tests",
+  "packaging",
+  "scripts",
+  "docs/CORE.md",
+  "pyproject.toml",
+  "README.md",
+  "alembic.ini",
+  "lightr.yaml.example",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lightr"]
