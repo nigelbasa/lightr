@@ -158,6 +158,13 @@ Note that IMAP clients will resync from scratch on first connect. The
 Go engine's IMAP server used positional UIDs that shifted on every
 delete, so every existing client cache is already stale.
 
+## Deploying
+
+Publishing to PyPI and installing on a server are both covered in
+[docs/DEPLOY.md](docs/DEPLOY.md), including the two things that must be
+sorted before anything else works: a PTR record for your IP, and an
+unblocked port 25.
+
 ## Development
 
 ```bash
