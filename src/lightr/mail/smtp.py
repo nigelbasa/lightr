@@ -207,7 +207,14 @@ class LightrHandler:
         if not mail_from:
             await self.record_bounces(raw)
 
-        analysis = await self.analyse(message, mail_from=mail_from, helo=helo)
+        analysis = await self.analyse(
+            message,
+            mail_from=mail_from,
+            helo=helo,
+            raw=raw,
+            remote_ip=remote_ip,
+            recipient_count=len(recipients),
+        )
 
         async with self.engine.begin() as conn:
             routes = await Router(conn).route_all(recipients)
@@ -305,18 +312,59 @@ class LightrHandler:
         return None
 
     async def analyse(
-        self, message: Message, *, mail_from: str, helo: str
+        self,
+        message: Message,
+        *,
+        mail_from: str,
+        helo: str,
+        raw: bytes = b"",
+        remote_ip: str = "",
+        recipient_count: int = 1,
     ) -> header_tools.Analysis:
-        """Score a message and evaluate its authentication.
+        """Evaluate authentication and score the message.
 
-        SPF, DKIM, and DMARC evaluation land in a later phase; the
-        structure is here so the header contract with Sieve is fixed
-        and the delivery path does not change when they arrive.
+        Authenticated submission skips this: a user who proved who they
+        are is not spam-checked, and SPF would fail for them anyway
+        since they are sending from wherever they happen to be.
         """
+        if self.require_auth or not self.cfg.spam.enabled:
+            return header_tools.Analysis(
+                auth=header_tools.AuthResults(mail_from=mail_from, helo=helo),
+                has_attachment=header_tools.has_attachment(message),
+            )
+
+        from lightr.mail import authentication as mail_auth
+        from lightr.mail.spam import RspamdClient, score_message
+
+        spf = await mail_auth.check_spf(remote_ip, mail_from, helo)
+        dkim = await mail_auth.check_dkim(raw)
+        dmarc = await mail_auth.check_dmarc(
+            mail_auth.from_domain_of(raw), spf, dkim
+        )
+
+        score = await RspamdClient(self.cfg.spam).score(raw)
+        if score is None:
+            score = score_message(
+                message,
+                spf=spf,
+                dkim=dkim,
+                dmarc=dmarc,
+                recipient_count=recipient_count,
+            )
+
+        _, is_junk = score.verdict(self.cfg.spam)
+
         return header_tools.Analysis(
-            score=0.0,
-            is_spam=False,
-            auth=header_tools.AuthResults(mail_from=mail_from, helo=helo),
+            score=score.points,
+            is_spam=is_junk,
+            reasons=score.reasons,
+            auth=header_tools.AuthResults(
+                spf=str(spf.result),
+                dkim=str(dkim.result),
+                dmarc=str(dmarc.result),
+                mail_from=mail_from,
+                helo=helo,
+            ),
             has_attachment=header_tools.has_attachment(message),
         )
 

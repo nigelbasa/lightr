@@ -57,3 +57,25 @@ async def go_engine(cfg: Config, go_ddl: str) -> AsyncIterator[AsyncEngine]:
     eng = create_engine(cfg)
     yield eng
     await eng.dispose()
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop the suite from making real DNS queries.
+
+    The delivery path evaluates SPF and DMARC, which resolve names. A
+    test suite that reaches the network is slow and flaky, and its
+    results depend on whoever owns the domain in the fixture. Tests
+    that mean to exercise those paths patch them explicitly.
+
+    Returns "no policy published", which is what a real lookup for a
+    .test domain yields anyway -- so behaviour is unchanged, just
+    hermetic and fast.
+    """
+
+    async def _no_policy(domain: str) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "lightr.mail.authentication._dmarc_policy", _no_policy, raising=False
+    )
