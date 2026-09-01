@@ -144,7 +144,9 @@ were bounce reports and backscatter, and 68 were old test sends. The
 mail an actual person wrote was 162 messages and 54 MB.
 
 ```bash
-python scripts/migrate_from_go.py ... --export-mail /var/tmp/mailout   --skip-bounces --skip-tests --mail-since 2026-01-01
+python scripts/migrate_from_go.py ... \
+  --export-mail /var/tmp/mailout \
+  --skip-bounces --skip-tests --mail-since 2026-01-01
 ```
 
 Filters affect only what is written to the export directory. The old
