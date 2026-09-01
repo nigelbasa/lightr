@@ -42,6 +42,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+imap = ["aioimaplib>=1.1"]
 sqlite = ["aiosqlite>=0.20"]
 postgres = ["asyncpg>=0.29"]
 ldap = ["ldap3>=2.9"]

@@ -1,5 +1,39 @@
 # Lightr — Python Rewrite Map
 
+## Status
+
+Phases 0–7 are built and tested; 8–9 are not started. 536 tests pass.
+
+| Phase | State | Notes |
+|---|---|---|
+| 0 Archive | **done** | Go on `archive/go-engine`, tagged `v0.1.0-go-final` |
+| 1 Foundation | **done** | Config, SQLAlchemy Core schema, Alembic, engine |
+| 2 Domain & identity | **done** | Models, repos, bcrypt auth, API keys, no permissions engine yet |
+| 3 Dovecot | **done** | Maildir, LMTP, Sieve generator, IMAP client, config generation |
+| 4 REST API | **partial** | Orgs/domains/accounts/aliases/apikeys + Dovecot passdb. Mailbox and webhook routes not wired |
+| 5 CLI | **done** | Resource groups, `mailbox`, `account passwd`, `dovecot`, uniform `--format` |
+| 6 Inbound SMTP | **partial** | Receive, submission, routing, header injection. SPF/DKIM-verify/DMARC/spam return neutral |
+| 7 Outbound | **partial** | DKIM signing, queue, sender, relay + direct MX. Bounce parsing not built |
+| 8 Integrations | **not started** | Webhooks, backup/export, mbox/maildir import, auth offload |
+| 9 Packaging | **not started** | PyPI wheel, `.deb`, systemd units |
+
+### Known gaps
+
+* **Spam scoring returns 0.0** and **SPF/DKIM/DMARC return "none"**. The
+  structure and the header contract with Sieve are fixed, so filling
+  them in does not change the delivery path — but no mail is currently
+  being classified.
+* **No permissions engine.** API keys carry scopes and are enforced;
+  the `permission_policies` / `sudo_sessions` tables are modelled but
+  unused.
+* **The mailbox REST routes are not wired**, though the adapter they
+  need is built and used by the CLI.
+* **Bounces are not parsed**, so the suppression list is never
+  populated automatically.
+* **Encryption-at-rest migration is unanswered** — see section 2.
+
+---
+
 Status: planning, decisions locked. No code written.
 
 Source of truth for scope: [CORE.md](CORE.md).
