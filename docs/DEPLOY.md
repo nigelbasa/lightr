@@ -61,9 +61,18 @@ to go in a file:
 $env:TWINE_USERNAME = "__token__"
 $env:TWINE_PASSWORD = "pypi-AgEIcHlwaS5vcmc..."   # paste yours
 
-python -m twine upload --repository-url https://test.pypi.org/legacy/ dist/*
-python -m twine upload dist/*
+# The venv's Python: twine is a dev dependency, not a global one.
+.venv\Scripts\python.exe -m twine upload `
+  --repository-url https://test.pypi.org/legacy/ `
+  dist\lightr-0.3.0-py3-none-any.whl dist\lightr-0.3.0.tar.gz
+
+.venv\Scripts\python.exe -m twine upload `
+  dist\lightr-0.3.0-py3-none-any.whl dist\lightr-0.3.0.tar.gz
 ```
+
+Name the files rather than writing `dist\*`: PowerShell does not expand
+wildcards for external commands, so the glob is passed through and only
+works because twine expands it itself.
 
 The variables live only in that shell session. Close it when you are
 done, and revoke the token if it has been anywhere it should not.
