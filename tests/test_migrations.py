@@ -68,7 +68,7 @@ class TestFreshInstall:
 
     def test_reports_head_revision(self, cfg: Config) -> None:
         migrate.upgrade(cfg)
-        assert migrate.current_revision(cfg) == migrate.head_revision(cfg) == "0002"
+        assert migrate.current_revision(cfg) == migrate.head_revision(cfg)
 
 
 class TestAdoptingAGoDatabase:
@@ -94,9 +94,15 @@ class TestAdoptingAGoDatabase:
             conn.close()
         assert names == ["Acme Ltd"]
 
-    def test_retired_tables_are_left_alone(self, go_db: Config) -> None:
-        """Their contents may be the only copy -- never drop them here."""
-        migrate.upgrade(go_db)
+    def test_0002_leaves_the_retired_tables_alone(self, go_db: Config) -> None:
+        """Adopting a Go database must not destroy anything.
+
+        0002 preserves messages and encryption_keys because at that
+        point they might have been the only copy. 0003 drops them, once
+        that question was answered -- so the safety is in the ordering:
+        an operator can stop at 0002, take a backup, and go on.
+        """
+        migrate.upgrade(go_db, "0002")
 
         assert go_db.database.path is not None
         tables = _tables(go_db.database.path)
@@ -120,3 +126,60 @@ class TestAsyncEntryPoint:
     async def test_upgrade_async_works_inside_a_loop(self, cfg: Config) -> None:
         await migrate.upgrade_async(cfg)
         assert migrate.is_up_to_date(cfg)
+
+
+class TestRetiredTables:
+    """0003 drops what Dovecot now owns.
+
+    0002 deliberately left these in place because they could have held
+    the only copy of something. That question is answered: the old
+    encrypted mail is not wanted.
+    """
+
+    def test_a_go_database_loses_them(self, go_db: Config) -> None:
+        assert go_db.database.path is not None
+        before = _tables(go_db.database.path)
+        assert {"messages", "encryption_keys"} <= before
+
+        migrate.upgrade(go_db)
+
+        after = _tables(go_db.database.path)
+        assert not ({"messages", "encryption_keys", "encrypted_messages"} & after)
+
+    def test_the_tables_lightr_owns_survive(self, go_db: Config) -> None:
+        migrate.upgrade(go_db)
+
+        assert go_db.database.path is not None
+        tables = _tables(go_db.database.path)
+        assert {"organizations", "domains", "accounts", "aliases", "api_keys"} <= tables
+
+    def test_data_in_the_surviving_tables_is_untouched(self, go_db: Config) -> None:
+        migrate.upgrade(go_db)
+
+        assert go_db.database.path is not None
+        conn = sqlite3.connect(go_db.database.path)
+        try:
+            assert [r[0] for r in conn.execute("SELECT name FROM organizations")] == [
+                "Acme Ltd"
+            ]
+        finally:
+            conn.close()
+
+    def test_a_fresh_install_never_creates_them(self, cfg: Config) -> None:
+        migrate.upgrade(cfg)
+
+        assert cfg.database.path is not None
+        assert not ({"messages", "encryption_keys"} & _tables(cfg.database.path))
+
+    def test_head_is_0003(self, cfg: Config) -> None:
+        migrate.upgrade(cfg)
+        assert migrate.current_revision(cfg) == migrate.head_revision(cfg) == "0003"
+
+    def test_downgrade_recreates_them_empty(self, go_db: Config) -> None:
+        """Reversible in structure only -- the contents are gone, and
+        the docstring on 0003 says so."""
+        migrate.upgrade(go_db)
+        migrate.downgrade(go_db, "0002")
+
+        assert go_db.database.path is not None
+        assert "messages" in _tables(go_db.database.path)

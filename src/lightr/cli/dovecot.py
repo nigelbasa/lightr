@@ -1,4 +1,9 @@
-"""Dovecot commands: generate its configuration, and check the seams."""
+"""Dovecot commands.
+
+Lightr manages Dovecot as an internal component: an operator runs
+``lightr dovecot install`` and never edits dovecot.conf, hashes a
+master password, or reloads the service by hand.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +21,17 @@ from . import output
 from .context import confirm, db, run, state
 from .output import Format
 
-app = typer.Typer(no_args_is_help=True, help="Configure and check Dovecot.")
+app = typer.Typer(
+    no_args_is_help=True, help="Configure and manage Dovecot."
+)
+
+# Lightr owns Dovecot end to end; these are the commands that do it.
+from . import dovecot_manage  # noqa: E402
+
+app.command("install")(dovecot_manage.install)
+app.command("status")(dovecot_manage.status)
+app.command("quota")(dovecot_manage.quota)
+app.command("resync")(dovecot_manage.resync)
 
 
 @app.command("setup")
@@ -25,9 +40,10 @@ def setup(
         bool, typer.Option("--force", help="Replace an existing internal key.")
     ] = False,
 ) -> None:
-    """Generate the shared secret Dovecot needs, and save it to the config.
+    """Generate only the shared secret Dovecot's auth script needs.
 
-    Run this once per install, before `dovecot config`.
+    Most installs want `lightr dovecot install`, which does this and
+    everything else. This exists for rotating the key on its own.
     """
     cfg = state.config
     target = state.config_path or type(cfg).default_path()

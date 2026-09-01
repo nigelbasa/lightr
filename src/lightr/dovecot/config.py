@@ -183,18 +183,18 @@ def dovecot_conf(cfg: Config, lua_path: Path) -> str:
 
     master_user_block = ""
     if dovecot.master_user:
-        master_user_block = f"""
+        master_user_block = """
 # Master user. Lets Lightr open any mailbox for the API and the
 # `lightr mailbox` commands without holding users' own passwords.
-passdb {{
+#
+# The matching /etc/dovecot/master-users file is generated and hashed
+# by Lightr -- do not edit it by hand, and do not add users to it.
+passdb {
   driver = passwd-file
   args = /etc/dovecot/master-users
   master = yes
   result_success = continue
-}}
-# Create /etc/dovecot/master-users containing:
-#   {dovecot.master_user}:{{CRYPT}}<hash of dovecot.master_password>
-# Generate the hash with: doveadm pw -s CRYPT
+}
 """
 
     return f"""#

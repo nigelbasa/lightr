@@ -1,14 +1,18 @@
 """Installing generated Sieve scripts where Dovecot will run them.
 
-The generator turns filter rules into a script; this puts that script
-on disk in the layout the generated ``dovecot.conf`` points at:
+Installation goes through ``doveadm sieve put`` / ``activate``. Dovecot
+then compiles the script and reports a syntax error, which writing the
+file directly would not -- a bad script would simply start failing
+deliveries at run time with nothing to point at.
 
-    <sieve_dir>/<domain>/<local_part>/active.sieve
+Uploading before activating also matters: if the new script does not
+compile, the mailbox keeps whatever was working before rather than
+being left with no active script.
 
-Writes are atomic. A Sieve script is read by Dovecot on every delivery,
-and a half-written one is a syntax error that stops mail for that
-account -- so the new script is written beside the old one and renamed
-into place, which is atomic on POSIX.
+There is a direct-file fallback for the case where doveadm is not
+available. It writes atomically -- into a temporary file in the same
+directory, then renames -- because Dovecot reads the script on every
+delivery, and a half-written one stops mail for that account.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from lightr.db import schema
+from lightr.dovecot.doveadm import Doveadm, DoveadmError
 from lightr.dovecot.maildir import MaildirError, _reject_unsafe
 from lightr.dovecot.sieve import (
     Action,
@@ -49,6 +54,7 @@ class InstallResult:
     path: Path
     rules: int
     changed: bool
+    via: str = "file"  # doveadm | file
 
 
 def script_path(sieve_dir: Path, email: str) -> Path:
@@ -152,11 +158,21 @@ def _json_list(value: object) -> list[object]:
 
 
 class SieveInstaller:
-    """Compiles an account's rules and installs the result."""
+    """Compiles an account's rules and installs the result.
 
-    def __init__(self, conn: AsyncConnection, sieve_dir: Path) -> None:
+    Prefers doveadm, which compiles the script and rejects a broken one
+    up front. Falls back to writing the file when doveadm is absent.
+    """
+
+    def __init__(
+        self,
+        conn: AsyncConnection,
+        sieve_dir: Path,
+        doveadm: Doveadm | None = None,
+    ) -> None:
         self._conn = conn
         self._sieve_dir = sieve_dir
+        self._doveadm = doveadm if doveadm is not None else Doveadm()
 
     async def rules_for(self, account_id: UUID) -> list[Rule]:
         rows = await self._conn.execute(
@@ -170,9 +186,10 @@ class SieveInstaller:
         """Generate and install one account's script."""
         rules = await self.rules_for(account_id)
         script = compile_script(rules)
+        rendered = script.render()
         path = script_path(self._sieve_dir, email)
 
-        changed = write_script(path, script.render())
+        changed, via = await self._deliver_script(email, rendered, path)
         if changed:
             await self._conn.execute(
                 update(schema.filter_rules)
@@ -186,7 +203,33 @@ class SieveInstaller:
             path=path,
             rules=len([r for r in rules if r.is_active]),
             changed=changed,
+            via=via,
         )
+
+    async def _deliver_script(
+        self, email: str, rendered: str, path: Path
+    ) -> tuple[bool, str]:
+        """Hand the script to Dovecot. Returns (changed, how)."""
+        if self._doveadm.available:
+            try:
+                await self._doveadm.install_sieve(email, rendered)
+            except DoveadmError as exc:
+                # A compile failure is the useful case: doveadm rejected
+                # the script, so name that rather than silently writing
+                # a file Dovecot will choke on at delivery time.
+                raise SieveError(
+                    f"Dovecot rejected the Sieve script for {email}: {exc}"
+                ) from exc
+            # doveadm has no "was it different" answer, so compare
+            # against the local copy to keep the result meaningful.
+            changed = write_script(path, rendered)
+            return changed, "doveadm"
+
+        log.warning(
+            "doveadm is unavailable; writing %s directly. Dovecot will not "
+            "check the script until it next delivers mail.", path,
+        )
+        return write_script(path, rendered), "file"
 
     async def install_all(self) -> list[InstallResult]:
         """Regenerate every account's script.
@@ -202,7 +245,7 @@ class SieveInstaller:
                 continue
             try:
                 results.append(await self.install(account.id, account.email))
-            except (SieveError, MaildirError, OSError) as exc:
+            except (SieveError, MaildirError, DoveadmError, OSError) as exc:
                 log.error("could not install Sieve for %s: %s", account.email, exc)
         return results
 

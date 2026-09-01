@@ -1,0 +1,309 @@
+"""Managing Dovecot as an internal component.
+
+Lightr owns Dovecot's configuration and lifecycle. An operator runs
+``lightr``; they do not edit ``dovecot.conf``, hash a master password
+by hand, or remember to reload the service afterwards.
+
+That means Lightr writes files outside its own tree and restarts
+another daemon, so every step here is deliberate about failure:
+
+* configuration is written atomically, and the previous version is
+  kept, so a bad generation can be rolled back
+* Dovecot's own ``doveconf`` checks the result **before** the service
+  is reloaded -- a config that does not parse would otherwise take
+  the mail server down
+* nothing is destructive: existing files are backed up, never replaced
+  in the dark
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import shutil
+import tempfile
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+
+from lightr.config import Config
+from lightr.dovecot import config as dovecot_config
+from lightr.dovecot.doveadm import Doveadm, DoveadmError
+
+log = logging.getLogger("lightr.dovecot")
+
+#: Where Dovecot's own config lives on a Debian install.
+DOVECOT_CONF_DIR = Path("/etc/dovecot")
+MASTER_USERS_FILE = DOVECOT_CONF_DIR / "master-users"
+
+#: Lightr's master user. Named so it is obvious in Dovecot's logs which
+#: connections are the engine's rather than a person's.
+DEFAULT_MASTER_USER = "lightr-master"
+
+
+class DovecotManagementError(RuntimeError):
+    """Dovecot could not be configured."""
+
+
+@dataclass
+class Change:
+    """One file Lightr wrote."""
+
+    path: Path
+    action: str  # written | unchanged | backed-up
+    backup: Path | None = None
+
+
+@dataclass
+class InstallReport:
+    changes: list[Change] = field(default_factory=list)
+    reloaded: bool = False
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def changed(self) -> bool:
+        return any(c.action == "written" for c in self.changes)
+
+
+def write_atomic(path: Path, content: str, *, mode: int = 0o644) -> Change:
+    """Write a file atomically, backing up anything already there.
+
+    Dovecot may read any of these at any moment, so the new content is
+    written beside the old and renamed into place.
+    """
+    if path.exists() and path.read_text(encoding="utf-8") == content:
+        return Change(path, "unchanged")
+
+    backup: Path | None = None
+    if path.exists():
+        stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+        backup = path.with_suffix(path.suffix + f".lightr-{stamp}.bak")
+        shutil.copy2(path, backup)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=".lightr-", suffix=".tmp")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as file:
+            file.write(content)
+            file.flush()
+            os.fsync(file.fileno())
+        Path(temporary).replace(path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+    path.chmod(mode)
+
+    return Change(path, "written", backup)
+
+
+class DovecotManager:
+    """Installs and maintains Dovecot's configuration."""
+
+    def __init__(
+        self,
+        cfg: Config,
+        *,
+        doveadm: Doveadm | None = None,
+        conf_dir: Path = DOVECOT_CONF_DIR,
+    ) -> None:
+        self.cfg = cfg
+        self.conf_dir = conf_dir
+        self.doveadm = doveadm if doveadm is not None else Doveadm()
+
+    # -- the whole job ----------------------------------------------------
+
+    async def install(self, *, reload: bool = True) -> InstallReport:
+        """Generate, verify, and install everything Dovecot needs."""
+        report = InstallReport()
+
+        # Everything from here is rolled back together. A half-written
+        # configuration -- the Lua auth script present but the conf
+        # missing, say -- is worse than none, because Dovecot may still
+        # start and behave in a way nobody configured.
+        try:
+            for generated in dovecot_config.generate(self.cfg):
+                target = self._retarget(generated.path)
+                report.changes.append(
+                    write_atomic(target, generated.content, mode=generated.mode)
+                )
+
+            master = await self.write_master_user()
+            if master is not None:
+                report.changes.append(master)
+        except BaseException:
+            self.rollback(report)
+            raise
+
+        if not report.changed:
+            log.info("Dovecot configuration is already current")
+            return report
+
+        # Verify before reloading. A config that does not parse would
+        # otherwise take the mail server down on the next restart.
+        problem = await self.verify()
+        if problem is not None:
+            self.rollback(report)
+            raise DovecotManagementError(
+                f"Dovecot rejected the generated configuration, so nothing was "
+                f"changed:\n{problem}"
+            )
+
+        if reload:
+            try:
+                await self.doveadm.reload()
+                report.reloaded = True
+            except DoveadmError as exc:
+                report.warnings.append(
+                    f"configuration written, but Dovecot did not reload: {exc}. "
+                    f"Run: systemctl reload dovecot"
+                )
+
+        return report
+
+    def _retarget(self, path: Path) -> Path:
+        """Point a generated path at this manager's conf directory."""
+        if self.conf_dir == DOVECOT_CONF_DIR:
+            return path
+        try:
+            relative = path.relative_to(DOVECOT_CONF_DIR)
+        except ValueError:
+            relative = Path(path.name)
+        return self.conf_dir / relative
+
+    # -- master user ------------------------------------------------------
+
+    async def write_master_user(self) -> Change | None:
+        """Write Dovecot's master-user file.
+
+        The master user is how Lightr opens any mailbox for the API and
+        the CLI without holding users' own passwords. Hashing goes
+        through ``doveadm pw`` so the format is whatever this Dovecot
+        actually accepts, rather than whatever we guessed.
+        """
+        dovecot = self.cfg.dovecot
+        if not dovecot.has_master_user:
+            return None
+
+        try:
+            digest = await self.doveadm.pw(dovecot.master_password)
+        except DoveadmError as exc:
+            raise DovecotManagementError(
+                f"could not hash the master password: {exc}"
+            ) from exc
+
+        content = f"{dovecot.master_user}:{digest}\n"
+        # Owner-only: this is a credential that opens every mailbox.
+        return write_atomic(self.conf_dir / "master-users", content, mode=0o600)
+
+    async def ensure_master_user(self) -> str:
+        """Create the master user if there is not one, returning its name.
+
+        Generates the password too. An operator should never have to
+        invent, hash, or type this -- it exists only for Lightr.
+        """
+        from lightr.auth import generate_password
+
+        if self.cfg.dovecot.has_master_user:
+            return self.cfg.dovecot.master_user
+
+        self.cfg.dovecot.master_user = DEFAULT_MASTER_USER
+        self.cfg.dovecot.master_password = generate_password(32)
+        return self.cfg.dovecot.master_user
+
+    # -- verification and rollback ----------------------------------------
+
+    async def verify(self) -> str | None:
+        """Check the configuration parses. Returns the problem, or None."""
+        if not shutil.which("doveconf"):
+            log.warning("doveconf is unavailable; the configuration was not checked")
+            return None
+
+        import asyncio
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "doveconf", "-n",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, err = await asyncio.wait_for(process.communicate(), timeout=15)
+        except (OSError, TimeoutError) as exc:
+            return f"could not run doveconf: {exc}"
+
+        if process.returncode:
+            return err.decode("utf-8", "replace").strip()
+        return None
+
+    def rollback(self, report: InstallReport) -> None:
+        """Undo an install, restoring whatever was there before."""
+        for change in reversed(report.changes):
+            if change.action != "written":
+                continue
+            if change.backup and change.backup.exists():
+                shutil.copy2(change.backup, change.path)
+                log.info("restored %s", change.path)
+            else:
+                # Nothing was there before; remove what we added.
+                change.path.unlink(missing_ok=True)
+                log.info("removed %s", change.path)
+
+    # -- status -----------------------------------------------------------
+
+    async def status(self) -> dict[str, object]:
+        """What Lightr can see of Dovecot right now."""
+        info: dict[str, object] = {
+            "doveadm_available": self.doveadm.available,
+            "conf_dir": str(self.conf_dir),
+            "master_user": self.cfg.dovecot.master_user or None,
+            "internal_key_set": bool(self.cfg.dovecot.internal_key),
+        }
+
+        if not self.doveadm.available:
+            info["version"] = None
+            return info
+
+        try:
+            info["version"] = (await self.doveadm.version()).splitlines()[0]
+        except DoveadmError as exc:
+            info["version"] = f"unavailable: {exc}"
+
+        try:
+            info["connected_users"] = len(await self.doveadm.who())
+        except DoveadmError:
+            info["connected_users"] = None
+
+        return info
+
+    async def provision_account(self, email: str, quota_bytes: int | None = None) -> None:
+        """Set up a new mailbox in Dovecot.
+
+        Dovecot creates a Maildir on first delivery, so this is not
+        strictly required -- but doing it now means the account is
+        selectable in a mail client immediately rather than looking
+        broken until its first message.
+        """
+        from lightr.dovecot.maildir import DEFAULT_FOLDERS
+
+        try:
+            await self.doveadm.mailbox_create(email, *DEFAULT_FOLDERS)
+        except DoveadmError as exc:
+            # Not fatal: Dovecot will create them itself on delivery.
+            log.warning("could not pre-create folders for %s: %s", email, exc)
+
+        if quota_bytes:
+            try:
+                await self.doveadm.quota_recalc(email)
+            except DoveadmError as exc:
+                log.debug("quota recalc for %s failed: %s", email, exc)
+
+
+__all__ = [
+    "DEFAULT_MASTER_USER",
+    "DOVECOT_CONF_DIR",
+    "MASTER_USERS_FILE",
+    "Change",
+    "DovecotManagementError",
+    "DovecotManager",
+    "InstallReport",
+    "write_atomic",
+]
