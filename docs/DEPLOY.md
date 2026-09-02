@@ -64,10 +64,10 @@ $env:TWINE_PASSWORD = "pypi-AgEIcHlwaS5vcmc..."   # paste yours
 # The venv's Python: twine is a dev dependency, not a global one.
 .venv\Scripts\python.exe -m twine upload `
   --repository-url https://test.pypi.org/legacy/ `
-  dist\lightr-0.3.1-py3-none-any.whl dist\lightr-0.3.1.tar.gz
+  dist\lightr-0.3.4-py3-none-any.whl dist\lightr-0.3.4.tar.gz
 
 .venv\Scripts\python.exe -m twine upload `
-  dist\lightr-0.3.1-py3-none-any.whl dist\lightr-0.3.1.tar.gz
+  dist\lightr-0.3.4-py3-none-any.whl dist\lightr-0.3.4.tar.gz
 ```
 
 Name the files rather than writing `dist\*`: PowerShell does not expand
@@ -115,7 +115,7 @@ rather than on anything about Lightr.
 git push && git push --tags
 ```
 
-The tag `v0.3.1` already exists locally.
+The tag `v0.3.4` already exists locally.
 
 ---
 

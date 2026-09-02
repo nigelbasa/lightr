@@ -35,15 +35,28 @@ class DovecotConfigError(ValueError):
     """The configuration could not be generated."""
 
 
+#: Dovecot's auth process runs as this user, and has to read the files
+#: that carry the credentials it authenticates with.
+DOVECOT_GROUP = "dovecot"
+
+
 @dataclass(frozen=True, slots=True)
 class GeneratedFile:
     path: Path
     content: str
     mode: int = 0o644
+    group: str | None = None
 
     @property
     def is_secret(self) -> bool:
-        return self.mode == 0o600
+        """Whether the file carries a credential.
+
+        Owner-plus-group, not owner-only: Dovecot's auth process runs
+        as the dovecot user, so a file it must read cannot be 0600
+        root:root. Restricting it to the group is the tightest setting
+        that still works.
+        """
+        return not self.mode & 0o007
 
 
 def generate_internal_key() -> str:
@@ -339,8 +352,12 @@ def generate(cfg: Config, *, api_base_url: str | None = None) -> list[GeneratedF
         GeneratedFile(
             path=lua_path,
             content=lua_script(cfg, base),
-            # Carries the internal key: readable only by Dovecot.
-            mode=0o600,
+            # Carries the internal key. Dovecot's auth process reads it
+            # as the dovecot user, so owner-only would leave the auth
+            # process dead on arrival: "passdb-lua: initialization
+            # failed: cannot open ...: Permission denied".
+            mode=0o640,
+            group=DOVECOT_GROUP,
         ),
     ]
 

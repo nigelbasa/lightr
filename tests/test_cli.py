@@ -309,3 +309,48 @@ class TestTopLevel:
         result = cli(installed, "init")
         assert result.exit_code == 1
         assert "--force" in result.output
+
+
+class TestInitDoesNotDestroyAConfig:
+    """`init --force` rewrites the whole file, not just what it wrote.
+
+    A database DSN, TLS paths, anything hand-edited -- all replaced. It
+    is the right behaviour for a command called "init", but losing the
+    old copy makes an ordinary mistake expensive, so it is kept.
+    """
+
+    def test_it_refuses_without_force(self, installed: Path) -> None:
+        result = cli(installed, "init")
+
+        assert result.exit_code == 1
+        assert "already exists" in result.output
+
+    def test_the_refusal_points_at_the_narrower_command(
+        self, installed: Path
+    ) -> None:
+        """Re-applying the Dovecot side is what people actually want
+        when they reach for --force."""
+        result = cli(installed, "init")
+
+        assert "lightr dovecot setup" in result.output
+
+    def test_force_keeps_a_copy_of_what_it_replaced(
+        self, installed: Path, tmp_path: Path
+    ) -> None:
+        original = installed.read_text(encoding="utf-8")
+        marker = "dsn: postgresql://someone:secret@127.0.0.1:5432/lightr"
+        installed.write_text(f"{original}\n# {marker}\n", encoding="utf-8")
+
+        result = cli(installed, "init", "--force", "--data-dir", str(tmp_path / "d2"))
+
+        assert result.exit_code == 0
+        copies = list(installed.parent.glob("*.replaced-*"))
+        assert len(copies) == 1
+        assert marker in copies[0].read_text(encoding="utf-8")
+
+    def test_it_says_the_config_was_replaced_not_merged(
+        self, installed: Path, tmp_path: Path
+    ) -> None:
+        result = cli(installed, "init", "--force", "--data-dir", str(tmp_path / "d3"))
+
+        assert "replaced, not merged" in result.output

@@ -8,7 +8,9 @@ the database the running config points at.
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 from alembic import command
 from alembic.config import Config as AlembicConfig
@@ -57,17 +59,49 @@ def head_revision(cfg: Config) -> str | None:
     return ScriptDirectory.from_config(alembic_config(cfg)).get_current_head()
 
 
-def current_revision(cfg: Config) -> str | None:
-    """The revision the database is stamped at, or None if unmanaged."""
-    from sqlalchemy import create_engine as create_sync_engine
+def _run_coro(coro: Any) -> Any:
+    """Run a coroutine whether or not a loop is already running.
 
-    url = cfg.database_url.replace("+aiosqlite", "").replace("+asyncpg", "")
-    engine = create_sync_engine(url)
+    ``current_revision`` is called from both -- ``lightr migrate`` is
+    synchronous, ``lightr status`` asks from inside its own event loop
+    -- and ``asyncio.run`` refuses the second case. A worker thread
+    gets its own loop, which is the only way to serve both without
+    making every caller async.
+    """
     try:
-        with engine.connect() as conn:
-            return MigrationContext.configure(conn).get_current_revision()
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
+async def _current_revision(cfg: Config) -> str | None:
+    from lightr.db.engine import create_engine
+
+    engine = create_engine(cfg)
+    try:
+        async with engine.connect() as conn:
+            return await conn.run_sync(
+                lambda sync_conn: MigrationContext.configure(
+                    sync_conn
+                ).get_current_revision()
+            )
     finally:
-        engine.dispose()
+        await engine.dispose()
+
+
+def current_revision(cfg: Config) -> str | None:
+    """The revision the database is stamped at, or None if unmanaged.
+
+    Goes through the async driver rather than stripping ``+asyncpg``
+    off the URL and building a synchronous engine. That strip left a
+    bare ``postgresql://``, which SQLAlchemy resolves to psycopg2 -- a
+    driver Lightr does not depend on and does not install, so every
+    Postgres install failed here with ModuleNotFoundError.
+    """
+    return _run_coro(_current_revision(cfg))
 
 
 def is_up_to_date(cfg: Config) -> bool:

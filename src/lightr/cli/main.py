@@ -213,9 +213,27 @@ def init(
     if target.exists() and not force:
         output.stderr.print(
             f"[red]{target} already exists.[/red] Pass --force to overwrite it, "
-            "or edit it directly."
+            "or edit it directly.\n"
+            "To re-apply only the Dovecot side, use: lightr dovecot setup"
         )
         raise typer.Exit(1)
+
+    replaced: Path | None = None
+    if target.exists():
+        # --force rewrites the whole file, not just the parts `init`
+        # cares about -- a database DSN, TLS paths, and anything else
+        # hand-edited go with it. Keeping a copy turns that from a loss
+        # into an inconvenience.
+        from datetime import UTC, datetime
+
+        stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+        replaced = target.with_suffix(f"{target.suffix}.replaced-{stamp}")
+        try:
+            replaced.write_bytes(target.read_bytes())
+            replaced.chmod(0o600)
+        except OSError as exc:  # pragma: no cover - unwritable directory
+            output.warn(f"could not back up {target}: {exc}")
+            replaced = None
 
     overrides: dict[str, object] = {}
     if data_dir:
@@ -234,6 +252,11 @@ def init(
     migrations.upgrade(cfg)
 
     output.success(f"Wrote {target}")
+    if replaced is not None:
+        output.warn(
+            f"The previous config was replaced, not merged. Anything you had "
+            f"edited into it -- a database DSN, TLS paths -- is in {replaced}"
+        )
     output.success(f"Initialised database at {cfg.database.path}")
 
     # Dovecot is an internal component, so configuring it is part of

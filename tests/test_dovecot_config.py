@@ -143,10 +143,10 @@ class TestGeneratedFiles:
         names = {f.path.name for f in files}
         assert names == {CONF_NAME, "lightr-auth.lua"}
 
-    def test_the_lua_script_is_owner_only(self, configured: Config) -> None:
-        """It holds the internal key."""
+    def test_the_lua_script_is_restricted(self, configured: Config) -> None:
+        """It holds the internal key -- but Dovecot has to read it."""
         lua = next(f for f in generate(configured) if f.path.suffix == ".lua")
-        assert lua.mode == 0o600
+        assert lua.mode == 0o640
         assert lua.is_secret
 
     def test_the_conf_is_world_readable(self, configured: Config) -> None:
@@ -241,3 +241,36 @@ class TestAgainstARealDovecot:
         assert "sieve" not in protocols
         # The Sieve *plugin* still runs at delivery time.
         assert "mail_plugins = $mail_plugins sieve" in conf
+
+
+class TestDovecotCanReadWhatWeWrite:
+    """The auth process runs as the dovecot user, not as root.
+
+    Files written 0600 root:root left it dead on arrival -- "passdb-lua:
+    initialization failed: cannot open ...: Permission denied" -- and
+    every login then failed with "Auth process broken". Found on a live
+    server, so both halves get asserted: not world-readable, and
+    readable by the group.
+    """
+
+    def test_the_lua_script_is_group_readable_by_dovecot(self, cfg: Config) -> None:
+        cfg.dovecot.internal_key = "k"
+        lua = next(g for g in generate(cfg) if g.path.name.endswith(".lua"))
+
+        assert lua.mode & 0o007 == 0, "world-readable"
+        assert lua.mode & 0o040, "dovecot cannot read it"
+        assert lua.group == "dovecot"
+
+    def test_it_still_counts_as_a_secret(self, cfg: Config) -> None:
+        """Group-readable is still secret -- the CLI flags it as
+        carrying the internal key."""
+        cfg.dovecot.internal_key = "k"
+        lua = next(g for g in generate(cfg) if g.path.name.endswith(".lua"))
+
+        assert lua.is_secret
+
+    def test_the_conf_file_is_not_secret(self, cfg: Config) -> None:
+        cfg.dovecot.internal_key = "k"
+        conf = next(g for g in generate(cfg) if g.path.name == CONF_NAME)
+
+        assert not conf.is_secret

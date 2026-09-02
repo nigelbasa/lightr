@@ -106,10 +106,17 @@ class TestInstall:
         assert content.startswith("lightr-master:{CRYPT}")
         assert "generated" not in content
 
-    async def test_the_master_users_file_is_owner_only(
+    async def test_the_master_users_file_is_not_world_readable(
         self, cfg_with_key: Config, tmp_path: Path
     ) -> None:
-        """It is a credential that opens every mailbox."""
+        """It is a credential that opens every mailbox.
+
+        Not owner-*only*, though: Dovecot's auth process reads it as
+        the dovecot user, and 0600 root:root left that process unable
+        to start -- "passwd-file ... Permission denied", then every
+        login failing with "Auth process broken". Owner-and-group is
+        the tightest setting that actually works.
+        """
         import os
 
         cfg_with_key.dovecot.master_user = "m"
@@ -119,7 +126,9 @@ class TestInstall:
         await _manager(cfg_with_key, conf_dir).install(reload=False)
 
         if os.name != "nt":  # pragma: no cover - POSIX only
-            assert (conf_dir / "master-users").stat().st_mode & 0o077 == 0
+            mode = (conf_dir / "master-users").stat().st_mode
+            assert mode & 0o007 == 0, "world-readable"
+            assert mode & 0o040, "dovecot cannot read it"
 
     async def test_no_master_user_means_no_file(
         self, cfg_with_key: Config, tmp_path: Path

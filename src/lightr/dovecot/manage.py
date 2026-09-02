@@ -66,7 +66,9 @@ class InstallReport:
         return any(c.action == "written" for c in self.changes)
 
 
-def write_atomic(path: Path, content: str, *, mode: int = 0o644) -> Change:
+def write_atomic(
+    path: Path, content: str, *, mode: int = 0o644, group: str | None = None
+) -> Change:
     """Write a file atomically, backing up anything already there.
 
     Dovecot may read any of these at any moment, so the new content is
@@ -93,8 +95,23 @@ def write_atomic(path: Path, content: str, *, mode: int = 0o644) -> Change:
         Path(temporary).unlink(missing_ok=True)
         raise
     path.chmod(mode)
+    if group:
+        _set_group(path, group)
 
     return Change(path, "written", backup)
+
+
+def _set_group(path: Path, group: str) -> None:
+    """Give a file to a group, if that group exists here.
+
+    A missing group is not fatal: it means Dovecot is not installed on
+    this machine, and the caller has already been told that. Failing
+    the whole write would turn a warning into an outage.
+    """
+    try:
+        shutil.chown(path, group=group)
+    except (LookupError, PermissionError, OSError, AttributeError) as exc:
+        log.warning("could not give %s to group %s: %s", path, group, exc)
 
 
 class DovecotManager:
@@ -187,7 +204,12 @@ class DovecotManager:
             for generated in dovecot_config.generate(self.cfg):
                 target = self._retarget(generated.path)
                 report.changes.append(
-                    write_atomic(target, generated.content, mode=generated.mode)
+                    write_atomic(
+                        target,
+                        generated.content,
+                        mode=generated.mode,
+                        group=generated.group,
+                    )
                 )
 
             master = await self.write_master_user()
@@ -255,8 +277,16 @@ class DovecotManager:
             ) from exc
 
         content = f"{dovecot.master_user}:{digest}\n"
-        # Owner-only: this is a credential that opens every mailbox.
-        return write_atomic(self.conf_dir / "master-users", content, mode=0o600)
+        # A credential that opens every mailbox -- but Dovecot's auth
+        # process has to read it, and that runs as the dovecot user.
+        # Owner-and-group is the tightest setting that works: 0600
+        # root:root leaves the auth process unable to start at all.
+        return write_atomic(
+            self.conf_dir / "master-users",
+            content,
+            mode=0o640,
+            group=dovecot_config.DOVECOT_GROUP,
+        )
 
     async def ensure_master_user(self) -> str:
         """Create the master user if there is not one, returning its name.

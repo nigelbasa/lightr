@@ -16,6 +16,7 @@ Three tables from the Go schema are intentionally absent:
 from __future__ import annotations
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Column,
     DateTime,
@@ -90,11 +91,15 @@ accounts = Table(
     Column("auth_mode", Text, nullable=False),
     Column("password_hash", Text),
     Column("external_id", Text),
-    Column("quota_bytes", Integer),
+    # BigInteger, not Integer: a 2 GB quota is 2147483648, one past the
+    # top of a signed 32-bit column. SQLite stores it anyway because its
+    # typing is dynamic; Postgres refuses the insert outright, so the
+    # narrower type only ever fails on a real deployment.
+    Column("quota_bytes", BigInteger),
     # Dovecot's quota plugin is authoritative for usage; this column is
     # retained for compatibility with Go-written databases and is no
     # longer maintained by Lightr.
-    Column("used_bytes", Integer, server_default="0"),
+    Column("used_bytes", BigInteger, server_default="0"),
     # Added by the Dovecot migration: where this account's Maildir lives.
     Column("maildir_path", Text),
     _created_at(),
