@@ -196,3 +196,48 @@ class TestOutputIntegrity:
 
         output.raw("no trailing newline")
         assert capsys.readouterr().out.endswith("\n")
+
+
+class TestAgainstARealDovecot:
+    """Two things a live Dovecot 2.3 rejected that the tests did not.
+
+    Both were found by running `lightr init` on a real server, and both
+    failed the same way -- doveconf refused the file, the install rolled
+    back, and mailboxes stayed down until it was fixed.
+    """
+
+    def test_the_lmtp_listener_is_named_relative_to_base_dir(
+        self, cfg: Config
+    ) -> None:
+        """Dovecot's stock 10-master.conf already declares
+        `unix_listener lmtp`. An absolute path resolves to the same
+        socket but counts as a second declaration, and Dovecot refuses
+        to start with "duplicate listener"."""
+        conf = dovecot_conf(cfg, Path("/etc/dovecot/lightr-auth.lua"))
+
+        assert "unix_listener lmtp {" in conf
+        assert "unix_listener /run/dovecot/lmtp" not in conf
+
+    def test_a_socket_outside_the_base_dir_is_kept_absolute(
+        self, cfg: Config
+    ) -> None:
+        """Only the default location merges with the stock listener; a
+        socket somewhere else has to be named in full."""
+        cfg.dovecot.lmtp_socket = Path("/var/spool/lightr/lmtp")
+        conf = dovecot_conf(cfg, Path("/etc/dovecot/lightr-auth.lua"))
+
+        assert "unix_listener /var/spool/lightr/lmtp {" in conf
+
+    def test_managesieve_is_not_required(self, cfg: Config) -> None:
+        """`sieve` in `protocols` is ManageSieve, which needs
+        dovecot-managesieved. Lightr installs Sieve scripts through
+        doveadm and would overwrite anything a user edited, so asking
+        for the protocol buys a dependency and a confusion."""
+        conf = dovecot_conf(cfg, Path("/etc/dovecot/lightr-auth.lua"))
+
+        protocols = next(
+            line for line in conf.splitlines() if line.startswith("protocols")
+        )
+        assert "sieve" not in protocols
+        # The Sieve *plugin* still runs at delivery time.
+        assert "mail_plugins = $mail_plugins sieve" in conf

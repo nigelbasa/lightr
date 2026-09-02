@@ -64,10 +64,10 @@ $env:TWINE_PASSWORD = "pypi-AgEIcHlwaS5vcmc..."   # paste yours
 # The venv's Python: twine is a dev dependency, not a global one.
 .venv\Scripts\python.exe -m twine upload `
   --repository-url https://test.pypi.org/legacy/ `
-  dist\lightr-0.3.0-py3-none-any.whl dist\lightr-0.3.0.tar.gz
+  dist\lightr-0.3.1-py3-none-any.whl dist\lightr-0.3.1.tar.gz
 
 .venv\Scripts\python.exe -m twine upload `
-  dist\lightr-0.3.0-py3-none-any.whl dist\lightr-0.3.0.tar.gz
+  dist\lightr-0.3.1-py3-none-any.whl dist\lightr-0.3.1.tar.gz
 ```
 
 Name the files rather than writing `dist\*`: PowerShell does not expand
@@ -115,7 +115,7 @@ rather than on anything about Lightr.
 git push && git push --tags
 ```
 
-The tag `v0.3.0` already exists locally.
+The tag `v0.3.1` already exists locally.
 
 ---
 
@@ -148,13 +148,15 @@ box. Sort it before going further.
 
 ```bash
 apt update
-apt install -y python3 python3-venv python3-pip \
-  dovecot-core dovecot-imapd dovecot-lmtpd dovecot-sieve dovecot-lua
+# Python 3.11+ is required. Ubuntu 22.04 ships 3.10, so add the PPA
+# there first: add-apt-repository ppa:deadsnakes/ppa
+apt install -y python3.12 python3.12-venv \
+  dovecot-core dovecot-imapd dovecot-lmtpd dovecot-sieve dovecot-auth-lua
 
 adduser --system --group --home /var/lib/lightr --shell /usr/sbin/nologin lightr
 adduser dovecot lightr          # Dovecot reads the Sieve scripts Lightr writes
 
-python3 -m venv /opt/lightr
+python3.12 -m venv /opt/lightr
 /opt/lightr/bin/pip install --upgrade pip
 /opt/lightr/bin/pip install 'lightr[sqlite,imap]'
 ln -sf /opt/lightr/bin/lightr /usr/local/bin/lightr
@@ -162,7 +164,14 @@ ln -sf /opt/lightr/bin/lightr /usr/local/bin/lightr
 lightr --version
 ```
 
-Use `'lightr[postgres,imap]'` instead if you want Postgres.
+Use `'lightr[postgres,sqlite,imap]'` for Postgres — keep `sqlite` in
+the list either way. `lightr init` writes a SQLite config first and you
+point it at Postgres afterwards, so it needs that driver even on an
+install that will never use it.
+
+The Lua auth package is **`dovecot-auth-lua`** on Debian and Ubuntu,
+not `dovecot-lua`. Without it Dovecot cannot call Lightr's passdb and
+nobody can log in.
 
 ### Configure
 

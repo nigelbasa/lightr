@@ -171,9 +171,19 @@ def dovecot_conf(cfg: Config, lua_path: Path) -> str:
     """
     dovecot = cfg.dovecot
     maildir = dovecot.maildir_root.as_posix()
+    # Named relative to Dovecot's base_dir, not as an absolute path.
+    # Dovecot's stock 10-master.conf already declares `unix_listener
+    # lmtp`; an absolute path here resolves to the same socket but
+    # counts as a second declaration, and Dovecot refuses to start with
+    # "duplicate listener". The relative name merges with the stock one
+    # instead, which is what we want -- we are only changing its mode
+    # and ownership.
     lmtp_socket = (
         dovecot.lmtp_socket.as_posix() if dovecot.lmtp_socket else "/run/dovecot/lmtp"
     )
+    lmtp_listener = Path(lmtp_socket).name if lmtp_socket.startswith(
+        ("/run/dovecot/", "/var/run/dovecot/")
+    ) else lmtp_socket
 
     sieve_dir = dovecot.sieve_dir.as_posix()
     # Dovecot requires this on a single line, however long it gets.
@@ -204,7 +214,7 @@ passdb {
 # Install as /etc/dovecot/conf.d/{CONF_NAME} and restart dovecot.
 #
 
-protocols = imap lmtp sieve
+protocols = imap lmtp
 
 #
 # Storage: Maildir, one file per message, never modified after write.
@@ -280,7 +290,7 @@ userdb {{
 # Lightr injects during its own spam and authentication analysis.
 #
 service lmtp {{
-  unix_listener {lmtp_socket} {{
+  unix_listener {lmtp_listener} {{
     mode = 0600
     user = lightr
     group = lightr
