@@ -26,7 +26,8 @@ depends:
   - dovecot-imapd
   - dovecot-lmtpd
   - dovecot-sieve
-  - dovecot-lua
+  - dovecot-sqlite
+  - dovecot-auth-lua
 recommends:
   - dovecot-managesieved
 suggests:

@@ -215,6 +215,8 @@ class DovecotManager:
             master = await self.write_master_user()
             if master is not None:
                 report.changes.append(master)
+
+            report.changes.extend(self.remove_retired())
         except BaseException:
             self.rollback(report)
             raise
@@ -244,6 +246,28 @@ class DovecotManager:
                 )
 
         return report
+
+    #: Files earlier versions generated that nothing reads now. The
+    #: Lua script is not merely unused -- it holds the internal auth
+    #: key, so leaving it behind leaves a credential in a file no
+    #: upgrade would ever touch again.
+    RETIRED = ("lightr-auth.lua",)
+
+    def remove_retired(self) -> list[Change]:
+        """Delete files a previous version wrote and this one does not."""
+        removed: list[Change] = []
+        for name in self.RETIRED:
+            path = self.conf_dir / name
+            if not path.exists():
+                continue
+            try:
+                path.unlink()
+            except OSError as exc:  # pragma: no cover - read-only /etc
+                log.warning("could not remove %s: %s", path, exc)
+                continue
+            log.info("removed %s, which nothing reads any more", path)
+            removed.append(Change(path, "removed"))
+        return removed
 
     def _retarget(self, path: Path) -> Path:
         """Point a generated path at this manager's conf directory."""

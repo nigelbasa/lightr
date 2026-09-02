@@ -159,6 +159,52 @@ def status(
 
 
 @app.command()
+def preflight(
+    fmt: Annotated[Format | None, typer.Option("--format", "-f")] = None,
+) -> None:
+    """Check this machine can actually run Lightr.
+
+    Exits non-zero if something means "cannot work" rather than "will
+    work worse". The distinction matters: a missing Dovecot SQL driver
+    stops delivery entirely, and reporting that as a warning is how an
+    install looks healthy for an hour.
+    """
+    from lightr import preflight as checks
+
+    report = checks.run(state.config, state.config_path)
+
+    if Format.resolve(fmt) is not Format.TABLE:
+        output.detail(
+            {
+                "ok": report.ok,
+                "checks": [
+                    {"name": c.name, "level": str(c.level), "detail": c.detail,
+                     "fix": c.fix}
+                    for c in report.checks
+                ],
+            },
+            fmt=fmt,
+        )
+    else:
+        for check in report.checks:
+            if check.level is checks.Level.OK:
+                output.success(f"{check.name}: {check.detail}")
+            elif check.level is checks.Level.WARN:
+                output.warn(f"{check.name}: {check.detail}")
+            else:
+                output.stderr.print(f"[red]FAIL[/red] {check.name}: {check.detail}")
+            if check.fix and check.level is not checks.Level.OK:
+                output.stderr.print(f"      {check.fix}")
+
+    if not report.ok:
+        output.stderr.print(
+            f"\n[red]{len(report.failures)} check(s) mean Lightr cannot work "
+            f"on this machine as configured.[/red]"
+        )
+        raise typer.Exit(1)
+
+
+@app.command()
 def serve() -> None:
     """Run the engine: HTTP API, SMTP, submission, and the sender.
 
@@ -181,6 +227,22 @@ def serve() -> None:
         output.stderr.print(
             "[red]The database schema is out of date.[/red] Run: lightr migrate"
         )
+        raise typer.Exit(1)
+
+    # Refuse rather than start half-working. Every one of these means
+    # something an operator would otherwise discover from a user
+    # reporting that mail does not arrive.
+    from lightr import preflight as checks
+
+    report = checks.run(cfg, state.config_path)
+    for warning in report.warnings:
+        output.warn(f"{warning.name}: {warning.detail}")
+    if not report.ok:
+        for failure in report.failures:
+            output.stderr.print(f"[red]FAIL[/red] {failure.name}: {failure.detail}")
+            if failure.fix:
+                output.stderr.print(f"      {failure.fix}")
+        output.stderr.print("\nRefusing to start. Run: lightr preflight")
         raise typer.Exit(1)
 
     # Reconcile on every start. An install that drifted -- a

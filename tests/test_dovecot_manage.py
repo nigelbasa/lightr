@@ -89,7 +89,8 @@ class TestInstall:
 
         written = {c.path.name for c in report.changes if c.action == "written"}
         assert "99-lightr.conf" in written
-        assert "lightr-auth.lua" in written
+        assert "lightr-checkpassword" in written
+        assert "lightr-userdb.conf.ext" in written
         assert "master-users" in written
 
     async def test_the_master_password_is_hashed_by_doveadm(
@@ -285,3 +286,39 @@ class TestStatus:
         )
         info = await manager.status()
         assert "unavailable" in str(info["version"])
+
+
+class TestRetiredFiles:
+    async def test_the_old_lua_script_is_removed(
+        self, cfg_with_key: Config, tmp_path: Path
+    ) -> None:
+        """It is not merely unused -- it holds the internal auth key.
+        Left behind, that is a credential in a file no upgrade would
+        ever touch again.
+        """
+        conf_dir = tmp_path / "dovecot"
+        conf_dir.mkdir()
+        stale = conf_dir / "lightr-auth.lua"
+        stale.write_text("-- INTERNAL_KEY = 'secret'", encoding="utf-8")
+
+        await _manager(cfg_with_key, conf_dir).install(reload=False)
+
+        assert not stale.exists()
+
+    async def test_removal_is_reported(
+        self, cfg_with_key: Config, tmp_path: Path
+    ) -> None:
+        conf_dir = tmp_path / "dovecot"
+        conf_dir.mkdir()
+        (conf_dir / "lightr-auth.lua").write_text("--", encoding="utf-8")
+
+        report = await _manager(cfg_with_key, conf_dir).install(reload=False)
+
+        assert any(c.action == "removed" for c in report.changes)
+
+    async def test_nothing_to_remove_is_fine(
+        self, cfg_with_key: Config, tmp_path: Path
+    ) -> None:
+        report = await _manager(cfg_with_key, tmp_path / "d").install(reload=False)
+
+        assert not any(c.action == "removed" for c in report.changes)

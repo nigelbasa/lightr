@@ -17,7 +17,6 @@ from lightr.dovecot.config import (
     dovecot_conf,
     generate,
     generate_internal_key,
-    lua_script,
 )
 
 
@@ -40,11 +39,11 @@ class TestInternalKey:
 
 class TestStorageSettings:
     def test_maildir_is_the_format(self, configured: Config) -> None:
-        assert "maildir:" in dovecot_conf(configured, Path("/x.lua"))
+        assert "maildir:" in dovecot_conf(configured)
 
     def test_single_instance_storage_is_not_enabled(self, configured: Config) -> None:
         """SIS is deprecated and its failure mode is losing attachments."""
-        conf = dovecot_conf(configured, Path("/x.lua"))
+        conf = dovecot_conf(configured)
         settings = [
             line.strip()
             for line in conf.splitlines()
@@ -54,32 +53,37 @@ class TestStorageSettings:
 
     def test_the_omission_is_explained(self, configured: Config) -> None:
         """A future maintainer must not 'helpfully' turn SIS on."""
-        assert "mail_attachment_dir" in dovecot_conf(configured, Path("/x.lua"))
+        assert "mail_attachment_dir" in dovecot_conf(configured)
 
     def test_maildir_root_is_posix(self, configured: Config) -> None:
-        conf = dovecot_conf(configured, Path("/x.lua"))
+        conf = dovecot_conf(configured)
         assert "\\" not in conf.split("mail_home =")[1].splitlines()[0]
 
     def test_special_use_folders_are_declared(self, configured: Config) -> None:
-        conf = dovecot_conf(configured, Path("/x.lua"))
+        conf = dovecot_conf(configured)
         for flag in ("\\Sent", "\\Drafts", "\\Trash", "\\Junk", "\\Archive"):
             assert flag in conf
 
 
 class TestAuthWiring:
-    def test_passdb_and_userdb_both_use_lua(self, configured: Config) -> None:
-        conf = dovecot_conf(configured, Path("/etc/dovecot/lightr-auth.lua"))
-        assert conf.count("driver = lua") == 2
+    def test_passdb_is_checkpassword(self, configured: Config) -> None:
+        """Not Lua: `dovecot.http` does not exist before Dovecot 2.4,
+        and Debian 12 and Ubuntu 22.04 both ship 2.3."""
+        conf = dovecot_conf(configured)
+        assert "driver = checkpassword" in conf
+        assert "driver = lua" not in conf
 
-    def test_lua_path_is_referenced(self, configured: Config) -> None:
-        conf = dovecot_conf(configured, Path("/etc/dovecot/lightr-auth.lua"))
-        assert "file=/etc/dovecot/lightr-auth.lua" in conf
+    def test_userdb_is_sql(self, configured: Config) -> None:
+        """LMTP looks a user up without authenticating as them, so
+        `prefetch` cannot serve it."""
+        conf = dovecot_conf(configured)
+        assert "driver = sql" in conf
 
     def test_master_user_block_only_when_configured(self, configured: Config) -> None:
-        assert "master = yes" not in dovecot_conf(configured, Path("/x.lua"))
+        assert "master = yes" not in dovecot_conf(configured)
 
         configured.dovecot.master_user = "lightr-master"
-        assert "master = yes" in dovecot_conf(configured, Path("/x.lua"))
+        assert "master = yes" in dovecot_conf(configured)
 
 
 class TestSieveWiring:
@@ -88,7 +92,7 @@ class TestSieveWiring:
     ) -> None:
         """The Sieve generator emits relational and imap4flags tests;
         Dovecot rejects a script using an extension it has not loaded."""
-        conf = dovecot_conf(configured, Path("/x.lua"))
+        conf = dovecot_conf(configured)
         for extension in (
             "+relational",
             "+comparator-i;ascii-numeric",
@@ -99,55 +103,35 @@ class TestSieveWiring:
             assert extension in conf
 
     def test_sieve_runs_on_lmtp(self, configured: Config) -> None:
-        conf = dovecot_conf(configured, Path("/x.lua"))
+        conf = dovecot_conf(configured)
         lmtp_block = conf.split("protocol lmtp {")[1].split("}")[0]
         assert "sieve" in lmtp_block
 
 
-class TestLuaScript:
-    def test_carries_the_internal_key(self, configured: Config) -> None:
-        assert "test-internal-key" in lua_script(configured, "http://127.0.0.1:8080")
-
-    def test_calls_both_internal_endpoints(self, configured: Config) -> None:
-        script = lua_script(configured, "http://127.0.0.1:8080")
-        assert "/internal/auth/verify" in script
-        assert "/internal/auth/user" in script
-
-    def test_defines_the_entry_points_dovecot_calls(self, configured: Config) -> None:
-        script = lua_script(configured, "http://127.0.0.1:8080")
-        for entry in ("auth_init", "auth_passdb_lookup", "auth_userdb_lookup"):
-            assert f"function {entry}" in script
-
-    def test_401_is_a_password_mismatch_not_an_error(self, configured: Config) -> None:
-        """Mapping 401 to INTERNAL_FAILURE would make every wrong
-        password look like an outage."""
-        script = lua_script(configured, "http://127.0.0.1:8080")
-        mismatch_branch = script.split("elseif status == 401")[1].split("end")[0]
-        assert "PASSWORD_MISMATCH" in mismatch_branch
-
-    def test_unreachable_lightr_is_an_internal_failure(self, configured: Config) -> None:
-        """Not a mismatch -- that would lock everyone out on a blip."""
-        script = lua_script(configured, "http://127.0.0.1:8080")
-        assert "PASSDB_RESULT_INTERNAL_FAILURE" in script
-
-    def test_quotes_in_credentials_are_escaped(self, configured: Config) -> None:
-        """A password containing a quote must not break the JSON body."""
-        script = lua_script(configured, "http://127.0.0.1:8080")
-        assert "json_escape" in script
-        assert "json_escape(req.password)" in script
-
-
 class TestGeneratedFiles:
-    def test_two_files_are_produced(self, configured: Config) -> None:
+    def test_the_expected_files_are_produced(self, configured: Config) -> None:
         files = generate(configured)
         names = {f.path.name for f in files}
-        assert names == {CONF_NAME, "lightr-auth.lua"}
+        assert names == {
+            CONF_NAME, "lightr-checkpassword", "lightr-userdb.conf.ext"
+        }
 
-    def test_the_lua_script_is_restricted(self, configured: Config) -> None:
-        """It holds the internal key -- but Dovecot has to read it."""
-        lua = next(f for f in generate(configured) if f.path.suffix == ".lua")
-        assert lua.mode == 0o640
-        assert lua.is_secret
+    def test_the_checkpassword_script_is_executable_and_restricted(
+        self, configured: Config
+    ) -> None:
+        """It holds the internal key, and the auth process runs it."""
+        script = next(
+            f for f in generate(configured) if f.path.name.endswith("checkpassword")
+        )
+        assert script.mode == 0o750
+        assert script.group == "dovecot"
+        assert script.is_secret
+
+    def test_the_userdb_conf_is_restricted(self, configured: Config) -> None:
+        """It holds the database password."""
+        conf = next(f for f in generate(configured) if f.path.suffix == ".ext")
+        assert conf.mode == 0o640
+        assert conf.group == "dovecot"
 
     def test_the_conf_is_world_readable(self, configured: Config) -> None:
         conf = next(f for f in generate(configured) if f.path.name == CONF_NAME)
@@ -155,16 +139,18 @@ class TestGeneratedFiles:
 
     def test_api_url_defaults_to_loopback(self, configured: Config) -> None:
         """These endpoints see plaintext passwords."""
-        lua = next(f for f in generate(configured) if f.path.suffix == ".lua")
-        assert "127.0.0.1" in lua.content
+        script = next(
+            f for f in generate(configured) if f.path.name.endswith("checkpassword")
+        )
+        assert "127.0.0.1" in script.content
 
     def test_api_url_can_be_overridden(self, configured: Config) -> None:
-        lua = next(
+        script = next(
             f
             for f in generate(configured, api_base_url="http://localhost:9999")
-            if f.path.suffix == ".lua"
+            if f.path.name.endswith("checkpassword")
         )
-        assert "http://localhost:9999" in lua.content
+        assert "http://localhost:9999" in script.content
 
 
 class TestOutputIntegrity:
@@ -213,7 +199,7 @@ class TestAgainstARealDovecot:
         `unix_listener lmtp`. An absolute path resolves to the same
         socket but counts as a second declaration, and Dovecot refuses
         to start with "duplicate listener"."""
-        conf = dovecot_conf(cfg, Path("/etc/dovecot/lightr-auth.lua"))
+        conf = dovecot_conf(cfg)
 
         assert "unix_listener lmtp {" in conf
         assert "unix_listener /run/dovecot/lmtp" not in conf
@@ -224,7 +210,7 @@ class TestAgainstARealDovecot:
         """Only the default location merges with the stock listener; a
         socket somewhere else has to be named in full."""
         cfg.dovecot.lmtp_socket = Path("/var/spool/lightr/lmtp")
-        conf = dovecot_conf(cfg, Path("/etc/dovecot/lightr-auth.lua"))
+        conf = dovecot_conf(cfg)
 
         assert "unix_listener /var/spool/lightr/lmtp {" in conf
 
@@ -233,7 +219,7 @@ class TestAgainstARealDovecot:
         dovecot-managesieved. Lightr installs Sieve scripts through
         doveadm and would overwrite anything a user edited, so asking
         for the protocol buys a dependency and a confusion."""
-        conf = dovecot_conf(cfg, Path("/etc/dovecot/lightr-auth.lua"))
+        conf = dovecot_conf(cfg)
 
         protocols = next(
             line for line in conf.splitlines() if line.startswith("protocols")
@@ -241,39 +227,6 @@ class TestAgainstARealDovecot:
         assert "sieve" not in protocols
         # The Sieve *plugin* still runs at delivery time.
         assert "mail_plugins = $mail_plugins sieve" in conf
-
-
-class TestDovecotCanReadWhatWeWrite:
-    """The auth process runs as the dovecot user, not as root.
-
-    Files written 0600 root:root left it dead on arrival -- "passdb-lua:
-    initialization failed: cannot open ...: Permission denied" -- and
-    every login then failed with "Auth process broken". Found on a live
-    server, so both halves get asserted: not world-readable, and
-    readable by the group.
-    """
-
-    def test_the_lua_script_is_group_readable_by_dovecot(self, cfg: Config) -> None:
-        cfg.dovecot.internal_key = "k"
-        lua = next(g for g in generate(cfg) if g.path.name.endswith(".lua"))
-
-        assert lua.mode & 0o007 == 0, "world-readable"
-        assert lua.mode & 0o040, "dovecot cannot read it"
-        assert lua.group == "dovecot"
-
-    def test_it_still_counts_as_a_secret(self, cfg: Config) -> None:
-        """Group-readable is still secret -- the CLI flags it as
-        carrying the internal key."""
-        cfg.dovecot.internal_key = "k"
-        lua = next(g for g in generate(cfg) if g.path.name.endswith(".lua"))
-
-        assert lua.is_secret
-
-    def test_the_conf_file_is_not_secret(self, cfg: Config) -> None:
-        cfg.dovecot.internal_key = "k"
-        conf = next(g for g in generate(cfg) if g.path.name == CONF_NAME)
-
-        assert not conf.is_secret
 
 
 class TestTheMasterUserActuallyWorks:
@@ -291,7 +244,7 @@ class TestTheMasterUserActuallyWorks:
         configured.dovecot.master_user = "lightr-master"
         configured.dovecot.master_password = "generated"
 
-        conf = dovecot_conf(configured, Path("/etc/dovecot/lightr-auth.lua"))
+        conf = dovecot_conf(configured)
 
         assert "auth_master_user_separator = *" in conf
 
@@ -304,7 +257,7 @@ class TestTheMasterUserActuallyWorks:
 
         configured.dovecot.master_user = "lightr-master"
         configured.dovecot.master_password = "generated"
-        conf = dovecot_conf(configured, Path("/etc/dovecot/lightr-auth.lua"))
+        conf = dovecot_conf(configured)
 
         login = master_login("ops@acme.test", "lightr-master")
         separator = next(
@@ -319,57 +272,8 @@ class TestTheMasterUserActuallyWorks:
     def test_no_separator_without_a_master_user(self, cfg: Config) -> None:
         """Nothing to split when there is no master user configured."""
         cfg.dovecot.internal_key = "k"
-        conf = dovecot_conf(cfg, Path("/etc/dovecot/lightr-auth.lua"))
+        conf = dovecot_conf(cfg)
 
         assert "auth_master_user_separator" not in conf
 
 
-class TestTheLuaClientSurvivesTheWorker:
-    """With blocking=yes, lookups run in auth-worker processes.
-
-    A client built in `auth_init` lives in the auth process and is nil
-    when a worker asks -- and because the call is wrapped in pcall,
-    that surfaced as the fixed string "lightr unreachable" with no clue
-    that the client, not the network, was the problem.
-    """
-
-    def test_the_client_is_built_lazily(self, configured: Config) -> None:
-        script = lua_script(configured, "http://127.0.0.1:8080")
-
-        assert "if http_client == nil then" in script
-        # auth_init must not be the only place it is created.
-        init_body = script.split("function auth_init()")[1].split("end")[0]
-        assert "dovecot.http.client" not in init_body
-
-    def test_a_failed_call_reports_why(self, configured: Config) -> None:
-        """"lightr unreachable" on its own is not diagnosable."""
-        script = lua_script(configured, "http://127.0.0.1:8080")
-
-        assert 'tostring(response)' in script
-
-
-class TestTheLuaPassdbRunsWhereHttpExists:
-    """`dovecot.http` is only available in the auth process.
-
-    blocking=yes sends the lookup to an auth-worker, where the API is
-    absent -- every login then fails with "attempt to index a nil value
-    (field 'http')". This is the setting the whole offloaded-auth
-    design depends on, and it was wrong.
-    """
-
-    def _args_lines(self, configured: Config) -> list[str]:
-        conf = dovecot_conf(configured, Path("/etc/dovecot/lightr-auth.lua"))
-        # The setting, not the comment explaining it.
-        return [
-            line.strip()
-            for line in conf.splitlines()
-            if line.strip().startswith("args =") and "lightr-auth.lua" in line
-        ]
-
-    def test_lookups_are_not_pushed_to_a_worker(self, configured: Config) -> None:
-        for line in self._args_lines(configured):
-            assert "blocking=no" in line
-            assert "blocking=yes" not in line
-
-    def test_both_passdb_and_userdb_agree(self, configured: Config) -> None:
-        assert len(self._args_lines(configured)) == 2
