@@ -17,6 +17,34 @@ All nine phases are built. 864 tests pass; ruff clean.
 | 8 Integrations | **done** | Webhooks with SSRF protection and emission; bounces and suppression |
 | 9 Packaging | **done** | PyPI wheel, `.deb` via nfpm, systemd unit, CI |
 
+### Blocker: the Lua passdb needs Dovecot 2.4
+
+`dovecot.http` — the API the generated Lua passdb calls Lightr with —
+**does not exist in Dovecot 2.3**. Not disabled, not misconfigured:
+Debian and Ubuntu ship Lua modules with zero HTTP symbols in them.
+Verified with `nm -D` against every `*lua*.so` in `/usr/lib/dovecot`
+on Ubuntu 22.04 (Dovecot 2.3.16). Every login fails with `attempt to
+index a nil value (field 'http')`, and because userdb takes the same
+path, LMTP delivery fails too.
+
+That makes the current design unusable on Debian 12 and Ubuntu 22.04 —
+which is every platform this engine claims to support. Dovecot 2.4 is
+not in either distribution.
+
+The fix is to stop requiring HTTP from inside Dovecot:
+
+* **passdb → `checkpassword`.** Dovecot runs an external program with
+  the credentials on a file descriptor. A small script POSTs to
+  Lightr's existing `/internal/auth/verify`, so offloaded providers
+  keep working through one auth path. Portable to every Dovecot.
+* **userdb → SQL.** "Where does this mailbox live" is always answered
+  by Lightr's own database, and never by an offloaded provider, so it
+  needs no HTTP at all. A direct query is faster and lets LMTP resolve
+  a user without a passdb lookup — which `prefetch` cannot do.
+
+Dovecot's `auth_cache` (already generated) blunts the process-spawn
+cost of `checkpassword`, and `lightr account passwd` already flushes it.
+
 ### What is deliberately not built
 
 * **A permissions engine.** API keys carry scopes and those are

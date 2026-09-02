@@ -274,3 +274,102 @@ class TestDovecotCanReadWhatWeWrite:
         conf = next(g for g in generate(cfg) if g.path.name == CONF_NAME)
 
         assert not conf.is_secret
+
+
+class TestTheMasterUserActuallyWorks:
+    """Declaring the master passdb is not enough.
+
+    Dovecot only splits "user*master" when the separator is set. Left
+    empty -- its default -- it looks the whole string up as one
+    username, the lookup fails, and the master user is silently inert.
+    Every mailbox read and the whole /v1/mailbox API go through it, so
+    on a live server this meant "Dovecot refused the master-user
+    login" on every single command.
+    """
+
+    def test_the_separator_is_declared(self, configured: Config) -> None:
+        configured.dovecot.master_user = "lightr-master"
+        configured.dovecot.master_password = "generated"
+
+        conf = dovecot_conf(configured, Path("/etc/dovecot/lightr-auth.lua"))
+
+        assert "auth_master_user_separator = *" in conf
+
+    def test_it_matches_the_form_lightr_logs_in_with(
+        self, configured: Config
+    ) -> None:
+        """The client side builds `<account>*<master>`; the server side
+        has to agree about the `*`."""
+        from lightr.cli.imap_client import master_login
+
+        configured.dovecot.master_user = "lightr-master"
+        configured.dovecot.master_password = "generated"
+        conf = dovecot_conf(configured, Path("/etc/dovecot/lightr-auth.lua"))
+
+        login = master_login("ops@acme.test", "lightr-master")
+        separator = next(
+            line.split("=", 1)[1].strip()
+            for line in conf.splitlines()
+            if line.startswith("auth_master_user_separator")
+        )
+
+        assert separator in login
+        assert login.split(separator) == ["ops@acme.test", "lightr-master"]
+
+    def test_no_separator_without_a_master_user(self, cfg: Config) -> None:
+        """Nothing to split when there is no master user configured."""
+        cfg.dovecot.internal_key = "k"
+        conf = dovecot_conf(cfg, Path("/etc/dovecot/lightr-auth.lua"))
+
+        assert "auth_master_user_separator" not in conf
+
+
+class TestTheLuaClientSurvivesTheWorker:
+    """With blocking=yes, lookups run in auth-worker processes.
+
+    A client built in `auth_init` lives in the auth process and is nil
+    when a worker asks -- and because the call is wrapped in pcall,
+    that surfaced as the fixed string "lightr unreachable" with no clue
+    that the client, not the network, was the problem.
+    """
+
+    def test_the_client_is_built_lazily(self, configured: Config) -> None:
+        script = lua_script(configured, "http://127.0.0.1:8080")
+
+        assert "if http_client == nil then" in script
+        # auth_init must not be the only place it is created.
+        init_body = script.split("function auth_init()")[1].split("end")[0]
+        assert "dovecot.http.client" not in init_body
+
+    def test_a_failed_call_reports_why(self, configured: Config) -> None:
+        """"lightr unreachable" on its own is not diagnosable."""
+        script = lua_script(configured, "http://127.0.0.1:8080")
+
+        assert 'tostring(response)' in script
+
+
+class TestTheLuaPassdbRunsWhereHttpExists:
+    """`dovecot.http` is only available in the auth process.
+
+    blocking=yes sends the lookup to an auth-worker, where the API is
+    absent -- every login then fails with "attempt to index a nil value
+    (field 'http')". This is the setting the whole offloaded-auth
+    design depends on, and it was wrong.
+    """
+
+    def _args_lines(self, configured: Config) -> list[str]:
+        conf = dovecot_conf(configured, Path("/etc/dovecot/lightr-auth.lua"))
+        # The setting, not the comment explaining it.
+        return [
+            line.strip()
+            for line in conf.splitlines()
+            if line.strip().startswith("args =") and "lightr-auth.lua" in line
+        ]
+
+    def test_lookups_are_not_pushed_to_a_worker(self, configured: Config) -> None:
+        for line in self._args_lines(configured):
+            assert "blocking=no" in line
+            assert "blocking=yes" not in line
+
+    def test_both_passdb_and_userdb_agree(self, configured: Config) -> None:
+        assert len(self._args_lines(configured)) == 2
