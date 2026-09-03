@@ -15,7 +15,9 @@ All nine phases are built. 864 tests pass; ruff clean.
 | 6 Inbound SMTP | **done** | Receive, submission, routing, SPF/DKIM/DMARC, spam scoring, bounce ingestion |
 | 7 Outbound | **done** | DKIM signing, queue with retries, sender, relay + direct MX |
 | 8 Integrations | **done** | Webhooks with SSRF protection and emission; bounces and suppression |
-| 9 Packaging | **done** | PyPI wheel, `.deb` via nfpm, systemd unit, CI |
+| 9 Packaging | **wheel done, `.deb` unverified** | PyPI wheel published; the `.deb` builds a bundled venv and has never been installed. See docs/RELEASING.md |
+| 10 Install experience | **done** | `lightr setup` in postinst, commented config template, `lightr db provision`, preflight |
+| 11 Limits and transport | **done** | Per-key and per-address rate limits; TLS termination documented |
 
 ### Blocker: the Lua passdb needs Dovecot 2.4
 
