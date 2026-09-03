@@ -277,7 +277,10 @@ class DovecotManager:
         try:
             generated = dovecot_config.generate(self.cfg)
         except dovecot_config.DovecotConfigError:
-            return stale
+            # Cannot even work out what the files should say -- usually
+            # no internal key yet. Reporting that as "no drift" would
+            # be the reassuring answer rather than the true one.
+            return ["(Dovecot has never been configured)"]
 
         for item in generated:
             target = self._retarget(item.path)

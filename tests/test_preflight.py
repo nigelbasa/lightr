@@ -216,3 +216,54 @@ class TestConfigPermissions:
 
         assert report.ok
         assert report.warnings
+
+
+class TestTheServiceCanReadItsConfig:
+    """The unit runs as User=lightr, and the file is 0640 root:lightr.
+
+    Get the group wrong and the service starts, cannot read its own
+    config, falls back to defaults, and looks healthy while pointing at
+    the wrong database. That is the same shape as the Lua passdb
+    failure -- everything green, nothing working -- so it is fatal.
+    """
+
+    def test_a_config_the_service_cannot_read_is_fatal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import os
+
+        if os.name == "nt":  # pragma: no cover - POSIX only
+            pytest.skip("POSIX permissions")
+
+        monkeypatch.setattr(
+            preflight, "_readable_by_service", lambda *args: False
+        )
+        path = tmp_path / "config.yaml"
+        path.write_text("server: {}\n", encoding="utf-8")
+        path.chmod(0o600)
+
+        report = preflight.Report()
+        preflight.check_config_readable(report, path)
+
+        assert not report.ok
+        assert "lightr" in (report.failures[0].fix or "")
+
+    def test_it_says_nothing_when_there_is_no_service_user(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pip install run by a person has no lightr user, and
+        failing that install would be wrong."""
+        import os
+
+        if os.name == "nt":  # pragma: no cover - POSIX only
+            pytest.skip("POSIX permissions")
+
+        monkeypatch.setattr(preflight, "_readable_by_service", lambda *args: True)
+        path = tmp_path / "config.yaml"
+        path.write_text("server: {}\n", encoding="utf-8")
+        path.chmod(0o600)
+
+        report = preflight.Report()
+        preflight.check_config_readable(report, path)
+
+        assert report.ok

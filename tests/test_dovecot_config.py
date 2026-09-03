@@ -277,3 +277,71 @@ class TestTheMasterUserActuallyWorks:
         assert "auth_master_user_separator" not in conf
 
 
+
+class TestDriftIsReportedNotCorrected:
+    """`serve` used to rewrite Dovecot's configuration on every start.
+
+    That means the mail engine holds write access to /etc/dovecot for
+    the life of the process -- or, with ProtectSystem=strict, warns on
+    every start instead. Configuration happens at install time now, and
+    a running service only says when it has drifted.
+    """
+
+    def test_an_unconfigured_dovecot_is_not_reported_as_current(
+        self, cfg: Config, tmp_path: Path
+    ) -> None:
+        """Without an internal key the files cannot even be generated.
+        Answering "no drift" there is the reassuring answer rather than
+        the true one."""
+        from lightr.dovecot.manage import DovecotManager
+
+        stale = DovecotManager(cfg, conf_dir=tmp_path).drift()
+
+        assert stale
+
+    def test_files_that_are_absent_count_as_drift(
+        self, configured: Config, tmp_path: Path
+    ) -> None:
+        from lightr.dovecot.manage import DovecotManager
+
+        stale = DovecotManager(configured, conf_dir=tmp_path).drift()
+
+        assert "lightr-userdb.conf.ext" in stale
+
+    def test_matching_files_are_not_drift(
+        self, configured: Config, tmp_path: Path
+    ) -> None:
+        from lightr.dovecot.manage import DovecotManager
+
+        manager = DovecotManager(configured, conf_dir=tmp_path)
+        _install_into(configured, tmp_path)
+
+        assert manager.drift() == []
+
+    def test_a_changed_database_shows_up(self, configured: Config, tmp_path: Path) -> None:
+        """Moving to Postgres rewrites the userdb conf. Until it is
+        applied, Dovecot is still looking in the old SQLite file."""
+        from lightr.config import DatabaseDriver
+        from lightr.dovecot.manage import DovecotManager
+
+        manager = DovecotManager(configured, conf_dir=tmp_path)
+        _install_into(configured, tmp_path)
+
+        configured.database.driver = DatabaseDriver.POSTGRES
+        configured.database.dsn = "postgresql://lightr:pw@127.0.0.1:5432/lightr"
+
+        assert "lightr-userdb.conf.ext" in manager.drift()
+
+
+def _install_into(cfg: Config, conf_dir: Path) -> None:
+    """Write the generated files where the manager will look for them."""
+    from lightr.dovecot.manage import DOVECOT_CONF_DIR
+
+    for item in generate(cfg):
+        try:
+            relative = item.path.relative_to(DOVECOT_CONF_DIR)
+        except ValueError:
+            relative = Path(item.path.name)
+        target = conf_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(item.content, encoding="utf-8")

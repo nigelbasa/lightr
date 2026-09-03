@@ -98,6 +98,7 @@ def status(
     fmt: Annotated[Format | None, typer.Option("--format", "-f")] = None,
 ) -> None:
     """Show whether the engine's dependencies are reachable."""
+    from lightr.config import DatabaseDriver
     from lightr.db import migrate as migrations
     from lightr.db.engine import create_engine, ping
 
@@ -150,7 +151,16 @@ def status(
     db_state = report["database"]
     assert isinstance(db_state, dict)
     if not db_state["reachable"]:
-        output.stderr.print("[red]Database unreachable.[/red] Try: lightr setup")
+        output.stderr.print(
+            "[red]Database unreachable.[/red] "
+            + (
+                "Check database.dsn and that Postgres is running: "
+                "systemctl status postgresql"
+                if cfg.database.driver is not DatabaseDriver.SQLITE
+                else f"Check {cfg.database.path} and its permissions, "
+                "or run: lightr setup"
+            )
+        )
         raise typer.Exit(1)
     if not db_state["up_to_date"]:
         output.warn("Schema is out of date. Run: lightr migrate")

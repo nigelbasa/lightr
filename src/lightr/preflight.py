@@ -250,7 +250,8 @@ def check_config_readable(report: Report, path: Path) -> None:
         )
         return
 
-    mode = path.stat().st_mode & 0o777
+    info = path.stat()
+    mode = info.st_mode & 0o777
     if mode & 0o007:
         report.add(
             "config",
@@ -259,7 +260,57 @@ def check_config_readable(report: Report, path: Path) -> None:
             f"chmod 640 {path}",
         )
         return
+
+    if not _readable_by_service(path, info.st_uid, info.st_gid, mode):
+        # Fatal, not a warning. The service starts, cannot read its own
+        # config, and falls back to defaults -- so it looks healthy
+        # while pointing at the wrong database.
+        report.add(
+            "config",
+            Level.FAIL,
+            f"{path} ({mode:o}) cannot be read by the {SERVICE_USER} user, "
+            "which is who the service runs as",
+            f"chown root:{SERVICE_GROUP} {path} && chmod 640 {path}",
+        )
+        return
+
     report.add("config", Level.OK, f"{path} ({mode:o})")
+
+
+#: Who the systemd unit runs as.
+SERVICE_USER = "lightr"
+SERVICE_GROUP = "lightr"
+
+
+def _readable_by_service(path: Path, uid: int, gid: int, mode: int) -> bool:
+    """Whether the service user could open this file.
+
+    Answers "yes" whenever it cannot tell -- no such user on this
+    machine, or no POSIX users at all. A check that guesses wrong in
+    the other direction fails an install that is fine.
+    """
+    try:
+        import grp
+        import pwd
+    except ImportError:  # pragma: no cover - not POSIX
+        return True
+
+    try:
+        service = pwd.getpwnam(SERVICE_USER)
+    except KeyError:
+        return True  # a pip install, run as whoever ran it
+
+    if service.pw_uid == uid:
+        return bool(mode & 0o400)
+    if service.pw_gid == gid:
+        return bool(mode & 0o040)
+    try:
+        group = grp.getgrgid(gid)
+    except KeyError:
+        return bool(mode & 0o004)
+    if SERVICE_USER in group.gr_mem:
+        return bool(mode & 0o040)
+    return bool(mode & 0o004)
 
 
 def check_doveconf(report: Report) -> None:
@@ -302,6 +353,8 @@ __all__ = [
     "DOVECOT_MODULES",
     "LUA_HTTP_DOVECOT",
     "MINIMUM_PYTHON",
+    "SERVICE_GROUP",
+    "SERVICE_USER",
     "Check",
     "Level",
     "Report",

@@ -101,9 +101,34 @@ def provision(
     migrations.upgrade(state.config)
     output.success("Database schema is up to date")
 
-    output.info(
-        "Dovecot reads this database too. Apply it with: lightr dovecot install"
+    # Dovecot reads this database too, through its own userdb conf --
+    # which still names the old SQLite file until it is rewritten.
+    # Printing "now run this" would leave delivery broken for exactly
+    # as long as it took someone to read the line.
+    _reconfigure_dovecot(state.config, target)
+
+
+def _reconfigure_dovecot(cfg: object, config_path: object) -> None:
+    """Point Dovecot at the database Lightr now uses.
+
+    Never fatal: the database move succeeded, and saying mailboxes are
+    down is more useful than unwinding it.
+    """
+    import asyncio
+    from pathlib import Path
+
+    from lightr.dovecot.manage import DovecotManager
+
+    report = asyncio.run(
+        DovecotManager(cfg).reconcile(save_config=Path(str(config_path)))  # type: ignore[arg-type]
     )
+    for change in report.changes:
+        if change.action == "written":
+            output.success(f"Reconfigured Dovecot: {change.path}")
+    if report.reloaded:
+        output.success("Dovecot reloaded")
+    for warning in report.warnings:
+        output.warn(warning)
 
 
 __all__ = ["app"]
