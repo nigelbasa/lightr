@@ -19,6 +19,7 @@ from . import (
     accounts,
     authproviders,
     backup,
+    database,
     dovecot,
     mailbox,
     operations,
@@ -42,6 +43,7 @@ app.add_typer(accounts.app, name="account")
 app.add_typer(resources.alias_app, name="alias")
 app.add_typer(mailbox.app, name="mailbox")
 app.add_typer(dovecot.app, name="dovecot")
+app.add_typer(database.app, name="db")
 app.add_typer(operations.apikey_app, name="apikey")
 app.add_typer(operations.queue_app, name="queue")
 app.add_typer(operations.suppression_app, name="suppression")
@@ -145,12 +147,12 @@ def status(
     report = run(_run)
     output.detail(report, fmt=fmt)
 
-    database = report["database"]
-    assert isinstance(database, dict)
-    if not database["reachable"]:
+    db_state = report["database"]
+    assert isinstance(db_state, dict)
+    if not db_state["reachable"]:
         output.stderr.print("[red]Database unreachable.[/red] Try: lightr setup")
         raise typer.Exit(1)
-    if not database["up_to_date"]:
+    if not db_state["up_to_date"]:
         output.warn("Schema is out of date. Run: lightr migrate")
     if not report["dovecot"]["master_user_configured"]:  # type: ignore[index]
         output.warn(

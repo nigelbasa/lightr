@@ -169,9 +169,11 @@ the list either way. `lightr setup` writes a SQLite config first and you
 point it at Postgres afterwards, so it needs that driver even on an
 install that will never use it.
 
-The Lua auth package is **`dovecot-auth-lua`** on Debian and Ubuntu,
-not `dovecot-lua`. Without it Dovecot cannot call Lightr's passdb and
-nobody can log in.
+Dovecot needs its own driver for whichever database Lightr uses:
+**`dovecot-sqlite`** or **`dovecot-pgsql`**. Without it Dovecot cannot
+answer "where does this mailbox live", and delivery fails with "Unknown
+database driver", which points at nothing. `lightr preflight` names the
+package you are missing.
 
 ### Configure
 
@@ -189,6 +191,40 @@ chmod 640 /etc/lightr/config.yaml
 key and master user, writes Dovecot's configuration, verifies it with
 `doveconf`, and reloads. There is no separate Dovecot step. If it
 warns, read the warning; mailboxes will not work until it is resolved.
+
+### Postgres
+
+SQLite is what a fresh install uses, and it is fine for one server. Move
+to Postgres when you want backups you can take while it runs,
+replication, or more than one Lightr on one database.
+
+```bash
+apt install -y postgresql postgresql-client dovecot-pgsql
+sudo lightr db provision
+```
+
+That creates the role and the database, grants what the migrations
+need, writes the connection string into `/etc/lightr/config.yaml`, and
+brings the schema up. It administers Postgres as the `postgres` system
+user -- the way a Debian-family install is administered locally -- so it
+needs root and no superuser password.
+
+The generated password is written into the config and printed nowhere.
+Nobody has to see it, so nobody has to be careful with it.
+
+It does **not** copy what is already in SQLite. On an install with data
+in it:
+
+```bash
+lightr backup create /var/backups/lightr/before-postgres.tar.gz
+sudo lightr db provision
+lightr backup restore /var/backups/lightr/before-postgres.tar.gz --yes
+lightr dovecot install     # Dovecot reads this database too
+```
+
+Run it again any time -- an existing role and database are left alone.
+The one thing it will not do quietly is reset the password of a role
+whose password is not already in your config; it says so when it has to.
 
 ### Your first domain
 
