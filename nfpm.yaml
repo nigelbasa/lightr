@@ -22,8 +22,12 @@ homepage: https://github.com/nigelbasa/lightr
 license: MIT
 
 depends:
-  - python3 (>= 3.11)
-  - python3-venv
+  # The interpreter the bundled venv was built against. Set by
+  # scripts/build-deb.sh from the python3 it actually used, because
+  # "python3 (>= 3.11)" is unsatisfiable on Ubuntu 22.04 -- its python3
+  # is 3.10, and a package that cannot be installed there is a
+  # confusing way to learn that.
+  - ${PYTHON_DEPENDS}
   - dovecot-core
   - dovecot-imapd
   - dovecot-lmtpd
