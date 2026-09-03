@@ -120,8 +120,13 @@ class TestRestore:
     ) -> None:
         result = cli(populated, "backup", "restore", str(archive), input="n\n")
 
-        assert "will be deleted" in result.output
-        assert "Cancelled" in result.output
+        # Rich wraps to the terminal width, so the phrase arrives split
+        # across a line break on a narrower terminal than this was
+        # written on. What matters is that the warning was shown, not
+        # where it happened to fold.
+        unwrapped = " ".join(result.output.split())
+        assert "will be deleted" in unwrapped
+        assert "Cancelled" in unwrapped
 
     def test_declining_changes_nothing(self, populated: Path, archive: Path) -> None:
         cli(populated, "backup", "restore", str(archive), input="n\n")
