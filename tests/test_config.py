@@ -210,7 +210,7 @@ class TestExplicitNulls:
     `lmtp_socket: null` is how an operator says 'use TCP, not a unix
     socket'. Excluding nulls on save made that setting silently revert
     to the default the next time anything wrote the config -- which
-    `lightr dovecot setup` does.
+    `lightr setup` does.
     """
 
     def test_a_null_survives_a_round_trip(self, tmp_path: Path) -> None:

@@ -119,7 +119,7 @@ Notes:
 Initialize config:
 
 ```bash
-lightr init --hostname mail.example.com
+lightr setup --hostname mail.example.com
 chown -R lightr:lightr /var/lib/lightr
 chown root:lightr /etc/lightr/config.yaml
 chmod 640 /etc/lightr/config.yaml
@@ -166,7 +166,7 @@ Notes:
 
 Keep the separation explicit during rollout:
 
-- `server.hostname` is the node-wide runtime identity used during init.
+- `server.hostname` is the node-wide runtime identity used during setup.
 - `domain.mail_hostname` is the public mail host that should line up with MX, SPF, DKIM-facing docs, TLS naming, and PTR where applicable.
 - In many single-domain installs they are the same value, but the operator model now keeps them distinct on purpose.
 

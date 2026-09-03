@@ -54,8 +54,13 @@ class CLIState:
         if path != self._loaded_from:
             self._config = None
 
+    def reload(self) -> None:
+        """Drop the cached config; the file on disk changed under it."""
+        self._config = None
+        self._loaded_from = None
+
     def set_config(self, config: Config) -> None:
-        """Install an already-built config (used by `lightr init`)."""
+        """Install an already-built config (used by `lightr setup`)."""
         self._config = config
         self._loaded_from = self.config_path
 
@@ -147,7 +152,7 @@ def _explain_operational_error(exc: OperationalError) -> str:
     if "unable to open database" in text:
         return (
             f"cannot open the database at {state.config.database.path}. "
-            "Check the path and permissions, or run: lightr init"
+            "Check the path and permissions, or run: lightr setup"
         )
     if "locked" in text:
         return "the database is locked by another process -- is lightr already running?"

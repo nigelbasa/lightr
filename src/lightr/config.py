@@ -11,7 +11,6 @@ Paths default to the Linux FHS locations the ``.deb`` installs into.
 
 from __future__ import annotations
 
-import os
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Self
@@ -259,8 +258,14 @@ class Config(_Base):
 
     @staticmethod
     def default_path() -> Path:
-        if env := os.environ.get("LIGHTR_CONFIG"):
-            return Path(env)
+        """Always /etc/lightr/config.yaml.
+
+        There was an environment variable here. It was redundant --
+        ``--config`` already points anywhere -- and it made the answer
+        to "which file is this install reading" depend on how the
+        process was started, which is the sort of thing that is only
+        ever discovered while something is broken.
+        """
         return DEFAULT_CONFIG_PATH
 
 

@@ -165,7 +165,7 @@ lightr --version
 ```
 
 Use `'lightr[postgres,sqlite,imap]'` for Postgres — keep `sqlite` in
-the list either way. `lightr init` writes a SQLite config first and you
+the list either way. `lightr setup` writes a SQLite config first and you
 point it at Postgres afterwards, so it needs that driver even on an
 install that will never use it.
 
@@ -180,12 +180,12 @@ mkdir -p /etc/lightr /var/mail/lightr /var/log/lightr
 chown lightr:lightr /var/mail/lightr /var/log/lightr
 chmod 2770 /var/mail/lightr
 
-lightr init --hostname mail.example.com
+lightr setup --hostname mail.example.com
 chown root:lightr /etc/lightr/config.yaml
 chmod 640 /etc/lightr/config.yaml
 ```
 
-`init` configures Dovecot as part of its job — it generates the auth
+`setup` configures Dovecot as part of its job — it generates the auth
 key and master user, writes Dovecot's configuration, verifies it with
 `doveconf`, and reloads. There is no separate Dovecot step. If it
 warns, read the warning; mailboxes will not work until it is resolved.
@@ -382,7 +382,7 @@ before you try.
 is a file, not a backup:
 
 ```bash
-lightr --config /tmp/test.yaml init --data-dir /tmp/test-restore
+lightr --config /tmp/test.yaml setup --data-dir /tmp/test-restore
 lightr --config /tmp/test.yaml backup restore /var/backups/lightr/<file> --yes
 lightr --config /tmp/test.yaml account list
 ```

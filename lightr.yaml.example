@@ -1,66 +1,72 @@
 # Lightr configuration.
 #
-# Written by `lightr init`. This copy documents the defaults.
-# Paths assume a Debian install; adjust for other layouts.
+# Everything commented out below is already the default -- the lines
+# are here to show what can be changed, not to be uncommented.
 #
-# Secrets live here (api.admin_key, dovecot.internal_key,
-# dovecot.master_password), so this file is 0640 root:lightr.
+# Secrets Lightr generates for itself -- the Dovecot internal key, the
+# master user and its password -- are written into this file the first
+# time `lightr setup` runs. Do not type them in by hand: they have to
+# match what Dovecot was given, and a key that does not fails as "wrong
+# password" for every user.
+#
+# After editing:  systemctl restart lightr
 
-data_dir: /var/lib/lightr
 server:
+  # The name this server calls itself in SMTP, and the name its
+  # certificate should match. Set this: the default is wrong for
+  # every real deployment, and receivers check it.
   hostname: localhost
-  bind_address: 0.0.0.0
+
+  # Address the SMTP listeners bind to. 0.0.0.0 is every interface.
+  # bind_address: 0.0.0.0
+
 database:
+  # sqlite is fine for a single server. Use postgres when you want
+  # backups, replication, or more than one Lightr talking to one
+  # database.
   driver: sqlite
-  path: /var/lib/lightr/lightr.db
-  dsn: ''
-http:
-  addr: :8080
-smtp:
-  addr: :25
-  submission_addr: :587
-  max_message_bytes: 26214400
-  max_recipients: 50
-  allow_insecure: false
-dovecot:
-  lmtp_socket: /run/dovecot/lmtp
-  lmtp_host: 127.0.0.1
-  lmtp_port: 24
-  imap_host: 127.0.0.1
-  imap_port: 143
-  imap_use_tls: false
-  imap_pool_size: 8
-  imap_idle_timeout_seconds: 60
-  master_user: ''
-  master_password: ''
-  internal_key: ''
-  doveadm_url: http://127.0.0.1:8080/doveadm/v1
-  doveadm_api_key: ''
-  maildir_root: /var/mail/lightr
-  sieve_dir: /var/lib/lightr/sieve
-dkim:
-  selector: default
-  key_bits: 2048
-api:
-  key: ''
-  admin_key: ''
-tls:
-  cert_file: /var/lib/lightr/tls/server.crt
-  key_file: /var/lib/lightr/tls/server.key
-  domain_certs: {}
-webhook:
-  url: ''
-  enabled: false
-logging:
-  level: info
-  file: /var/log/lightr/lightr.log
-spam:
-  enabled: true
-  suspicious_threshold: 2.0
-  junk_threshold: 4.0
-  dnsbl_zones: []
-  rspamd_url: ''
-  rspamd_password: ''
-  timeout_seconds: 5
-security:
-  require_tls_for_auth: true
+
+  # For postgres, set driver: postgres and put the DSN here. Dovecot
+  # reads this database too, so the role needs SELECT on it.
+  # dsn: postgresql://lightr:password@127.0.0.1:5432/lightr
+
+  # Where the sqlite file lives. Defaults to data_dir/lightr.db.
+  # path: /var/lib/lightr/lightr.db
+
+# smtp:
+#   addr: ":25"              # inbound mail from other servers
+#   submission_addr: ":587"  # mail from your own users, authenticated
+#   max_message_bytes: 26214400
+#   max_recipients: 50
+
+# http:
+#   # The operator API and the endpoints Dovecot authenticates against.
+#   # Loopback-only unless you put a reverse proxy in front of it: this
+#   # is plain HTTP and sees plaintext passwords. See docs/DEPLOY.md.
+#   addr: ":8080"
+
+# tls:
+#   # Used for SMTP STARTTLS. Point these at your certificate; without
+#   # one, submission refuses to accept a password.
+#   cert_file: /etc/letsencrypt/live/mail.example.com/fullchain.pem
+#   key_file: /etc/letsencrypt/live/mail.example.com/privkey.pem
+
+# dkim:
+#   # The selector published in DNS as <selector>._domainkey.<domain>.
+#   selector: default
+#   key_bits: 2048
+
+# spam:
+#   enabled: true
+#   # Score at which a message is filed as Junk rather than delivered.
+#   junk_threshold: 4.0
+#   # rspamd_url: http://127.0.0.1:11333
+
+# webhook:
+#   # Delivery events are POSTed here, signed with a shared secret.
+#   url: https://example.com/lightr/events
+#   enabled: false
+
+# logging:
+#   level: info
+#   file: /var/log/lightr/lightr.log

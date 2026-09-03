@@ -34,16 +34,17 @@ app.command("quota")(dovecot_manage.quota)
 app.command("resync")(dovecot_manage.resync)
 
 
-@app.command("setup")
-def setup(
+@app.command("rotate-key")
+def rotate_key(
     force: Annotated[
         bool, typer.Option("--force", help="Replace an existing internal key.")
     ] = False,
 ) -> None:
-    """Generate only the shared secret Dovecot's auth script needs.
+    """Replace the shared secret Dovecot authenticates to Lightr with.
 
-    Most installs want `lightr dovecot install`, which does this and
-    everything else. This exists for rotating the key on its own.
+    Nothing needs this on a normal install -- `lightr setup` generates
+    the key and `lightr dovecot install` writes it out. It exists for
+    rotating a key that may have been exposed.
     """
     cfg = state.config
     target = state.config_path or type(cfg).default_path()
@@ -51,8 +52,8 @@ def setup(
     if cfg.dovecot.internal_key and not force:
         output.stderr.print(
             "[yellow]An internal key is already set.[/yellow] "
-            "Pass --force to replace it -- Dovecot's Lua script must then be "
-            "regenerated, or IMAP logins will start failing."
+            "Pass --force to replace it -- Dovecot's checkpassword script must "
+            "then be regenerated, or IMAP logins will start failing."
         )
         raise typer.Exit(1)
 
@@ -60,7 +61,7 @@ def setup(
     cfg.save(target)
 
     output.success(f"Generated an internal key and saved it to {target}")
-    output.info("Next: lightr dovecot config --write")
+    output.info("Next: lightr dovecot install")
 
 
 @app.command("config")
@@ -130,7 +131,7 @@ def check() -> None:
     problems: list[str] = []
 
     if not cfg.dovecot.internal_key:
-        problems.append("dovecot.internal_key is unset -- run: lightr dovecot setup")
+        problems.append("dovecot.internal_key is unset -- run: lightr setup")
     if not cfg.dovecot.has_master_user:
         problems.append(
             "dovecot.master_user/master_password are unset -- "

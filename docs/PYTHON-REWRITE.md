@@ -565,7 +565,7 @@ Two artifacts:
   `dovecot-sieve`, and `dovecot-lua` (for passdb). Ships systemd units and a
   templated Dovecot config drop-in.
 
-The `.deb` is now the harder artifact: `lightr init` must generate a working
+The `.deb` is now the harder artifact: `lightr setup` must generate a working
 Dovecot configuration, not just its own. Treat Dovecot config templating as a
 first-class deliverable in phase 9, with the generated files reviewed as
 carefully as the Python.

@@ -54,7 +54,7 @@ sudo apt install ./lightr_0.4.0_all.deb
 ## Quick start
 
 ```bash
-lightr init --hostname mail.example.com
+lightr setup --hostname mail.example.com
 
 lightr domain create example.com
 lightr domain dkim example.com --generate
@@ -65,12 +65,14 @@ lightr account create ops@example.com   # prompts for a password
 lightr serve
 ```
 
-There is no step for Dovecot. `lightr init` generates its auth key and
+There is no step for Dovecot. `lightr setup` generates its auth key and
 master user, writes its configuration, verifies that configuration with
-Dovecot's own parser, and reloads the service. `lightr serve` does the
-same check on every start, so an install that drifts — a hand-edited
-file, a package upgrade that replaced one — comes back into line on its
-own. Creating an account provisions its mailbox.
+Dovecot's own parser, and reloads the service. The Debian package runs
+it for you, so on that path the quick start starts at
+`lightr domain create`. `lightr serve` reports it if that configuration
+has drifted since — it does not rewrite it, because a running mail
+engine has no business holding write access to `/etc/dovecot`.
+Creating an account provisions its mailbox.
 
 You never edit `dovecot.conf`, hash a master password, or restart
 Dovecot. If Dovecot is missing or broken, Lightr says so and keeps
@@ -138,7 +140,14 @@ wire would let the holder forge every event the server sends.
 
 ## Configuration
 
-`/etc/lightr/config.yaml`. `lightr init` writes a working one.
+`/etc/lightr/config.yaml` — always, with no environment variable to
+point it elsewhere. `lightr setup` writes a commented template there if
+there is nothing, and the Debian package runs that on install, so the
+file exists before you first open it.
+
+Lightr writes back only the secrets it generates for itself, and it
+edits the lines rather than rewriting the file, so your comments and
+anything you hand-edited stay where you put them.
 
 An existing config from the Go engine loads unchanged — the retired
 `imap` block is ignored, replaced by a `dovecot` block describing how

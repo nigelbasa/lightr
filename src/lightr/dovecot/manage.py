@@ -133,11 +133,12 @@ class DovecotManager:
     async def reconcile(self, *, save_config: Path | None = None) -> InstallReport:
         """Make Dovecot match Lightr's configuration. Safe to call always.
 
-        This is the automatic path: ``lightr init`` calls it, and
-        ``lightr serve`` calls it on every start, so an install that has
-        drifted -- a hand-edited conf, a package upgrade that replaced
-        a file, a config change nobody re-applied -- converges on its
-        own. An operator never has to know it happened.
+        This is the automatic path: ``lightr setup`` calls it, and the
+        package runs that on install and upgrade, so an install that
+        has drifted -- a hand-edited conf, a package upgrade that
+        replaced a file, a config change nobody re-applied -- converges
+        without an operator knowing it happened. ``serve`` only reports
+        drift; see ``drift``.
 
         Never raises. Dovecot being misconfigured is worth a loud
         warning, but it must not stop Lightr from starting: the API,
@@ -149,8 +150,22 @@ class DovecotManager:
 
         missing = self.fill_in_gaps()
         if missing and save_config is not None:
+            # Surgical, not load-modify-dump. Dumping the model back
+            # over the config file writes away every comment in it --
+            # and, on a live server once, a hand-edited Postgres DSN.
+            from lightr import configtemplate
+
             try:
-                self.cfg.save(save_config)
+                configtemplate.set_values(
+                    save_config,
+                    {
+                        ("dovecot", "internal_key"): self.cfg.dovecot.internal_key,
+                        ("dovecot", "master_user"): self.cfg.dovecot.master_user,
+                        ("dovecot", "master_password"): (
+                            self.cfg.dovecot.master_password
+                        ),
+                    },
+                )
                 report.generated = missing
             except OSError as exc:
                 report.warnings.append(
@@ -246,6 +261,34 @@ class DovecotManager:
                 )
 
         return report
+
+    def drift(self) -> list[str]:
+        """Names of generated files that no longer match this config.
+
+        Read-only on purpose. ``serve`` used to reconcile on every
+        start, which meant the service needed write access to
+        /etc/dovecot -- so either the unit granted the mail engine
+        runtime write access to Dovecot's configuration, or
+        ``ProtectSystem=strict`` made it warn on every start. Neither
+        is worth it. Configuration happens at install time; a running
+        service reports drift and leaves it alone.
+        """
+        stale: list[str] = []
+        try:
+            generated = dovecot_config.generate(self.cfg)
+        except dovecot_config.DovecotConfigError:
+            return stale
+
+        for item in generated:
+            target = self._retarget(item.path)
+            try:
+                current = target.read_text(encoding="utf-8")
+            except OSError:
+                stale.append(target.name)
+                continue
+            if current != item.content:
+                stale.append(target.name)
+        return stale
 
     #: Files earlier versions generated that nothing reads now. The
     #: Lua script is not merely unused -- it holds the internal auth

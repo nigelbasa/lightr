@@ -1,9 +1,15 @@
 #!/bin/sh
 # Post-install for the lightr package.
+#
+# Nothing here is silenced. An earlier version ended every command with
+# ">/dev/null 2>&1 || true", so an install that could not write its own
+# config still printed "Lightr installed. Next steps:" -- which is
+# exactly the failure the preflight checks exist to stop.
 set -e
 
 USER=lightr
 GROUP=lightr
+CONFIG=/etc/lightr/config.yaml
 
 case "$1" in
   configure)
@@ -29,22 +35,43 @@ case "$1" in
     chmod 2770 /var/mail/lightr /var/lib/lightr/sieve
 
     mkdir -p /etc/lightr
-    if [ ! -f /etc/lightr/config.yaml ]; then
-      lightr --config /etc/lightr/config.yaml init >/dev/null 2>&1 || true
-      lightr --config /etc/lightr/config.yaml dovecot setup >/dev/null 2>&1 || true
-    else
-      # Existing install: bring the schema up to date. Safe to repeat.
-      lightr --config /etc/lightr/config.yaml migrate >/dev/null 2>&1 || true
+    chown root:"$GROUP" /etc/lightr
+    chmod 750 /etc/lightr
+
+    # Writes the commented config if there is none, migrates the
+    # schema, generates Dovecot's secrets and installs its
+    # configuration. Idempotent, and it never replaces the config file
+    # -- so this is also the upgrade path.
+    if ! lightr setup; then
+      echo "lightr setup failed. The package is installed but not configured." >&2
+      echo "Fix what it reported, then run: lightr setup" >&2
+      exit 1
     fi
 
-    # The config holds the API admin key and the Dovecot internal key.
-    chown root:"$GROUP" /etc/lightr/config.yaml 2>/dev/null || true
-    chmod 640 /etc/lightr/config.yaml 2>/dev/null || true
+    # The config holds the database password and the Dovecot internal
+    # key. The service reads it as the lightr user.
+    chown root:"$GROUP" "$CONFIG"
+    chmod 640 "$CONFIG"
 
-    echo "Lightr installed. Next steps:"
-    echo "  lightr dovecot config --write   # generate Dovecot's configuration"
-    echo "  systemctl restart dovecot"
-    echo "  systemctl enable --now lightr"
+    if [ -d /run/systemd/system ]; then
+      systemctl daemon-reload >/dev/null 2>&1 || true
+      systemctl try-restart dovecot.service >/dev/null 2>&1 || true
+    fi
+
+    # Report rather than assert: this runs before the service starts,
+    # and preflight is the thing that knows what "cannot work" means.
+    lightr preflight || true
+
+    cat <<'EOF'
+
+Lightr is installed and configured.
+
+  systemctl enable --now lightr     start the engine
+  lightr setup --hostname <name>    set the name this server calls itself
+  lightr domain create <domain>     add your first domain
+
+Configuration is /etc/lightr/config.yaml.
+EOF
     ;;
 esac
 

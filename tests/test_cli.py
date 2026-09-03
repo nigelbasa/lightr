@@ -305,52 +305,63 @@ class TestTopLevel:
         assert result.exit_code == 0
         assert "Nothing to do" in result.output
 
-    def test_init_refuses_to_clobber(self, installed: Path) -> None:
-        result = cli(installed, "init")
-        assert result.exit_code == 1
-        assert "--force" in result.output
+    def test_setup_is_idempotent(self, installed: Path) -> None:
+        """The package runs it on every upgrade."""
+        result = cli(installed, "setup")
+
+        assert result.exit_code == 0, result.output
 
 
-class TestInitDoesNotDestroyAConfig:
-    """`init --force` rewrites the whole file, not just what it wrote.
-
-    A database DSN, TLS paths, anything hand-edited -- all replaced. It
-    is the right behaviour for a command called "init", but losing the
-    old copy makes an ordinary mistake expensive, so it is kept.
+class TestSetupDoesNotDestroyAConfig:
+    """`init --force` used to rewrite the whole file -- a database DSN,
+    TLS paths, anything hand-edited, all replaced. It did exactly that
+    on a live server once. `setup` has no --force and never writes over
+    a config that exists.
     """
 
-    def test_it_refuses_without_force(self, installed: Path) -> None:
-        result = cli(installed, "init")
+    def test_it_leaves_an_existing_config_alone(self, installed: Path) -> None:
+        marker = "# dsn: postgresql://someone:secret@127.0.0.1:5432/lightr"
+        installed.write_text(
+            installed.read_text(encoding="utf-8") + marker + "\n", encoding="utf-8"
+        )
 
-        assert result.exit_code == 1
-        assert "already exists" in result.output
+        result = cli(installed, "setup")
 
-    def test_the_refusal_points_at_the_narrower_command(
-        self, installed: Path
+        assert result.exit_code == 0, result.output
+        assert marker in installed.read_text(encoding="utf-8")
+
+    def test_it_writes_the_commented_template_when_there_is_none(
+        self, tmp_path: Path
     ) -> None:
-        """Re-applying the Dovecot side is what people actually want
-        when they reach for --force."""
-        result = cli(installed, "init")
+        target = tmp_path / "etc" / "config.yaml"
 
-        assert "lightr dovecot setup" in result.output
+        result = cli(target, "setup")
 
-    def test_force_keeps_a_copy_of_what_it_replaced(
-        self, installed: Path, tmp_path: Path
+        assert result.exit_code == 0, result.output
+        assert "Everything commented out below" in target.read_text(encoding="utf-8")
+
+    def test_it_warns_while_the_hostname_is_still_the_default(
+        self, tmp_path: Path
     ) -> None:
-        original = installed.read_text(encoding="utf-8")
-        marker = "dsn: postgresql://someone:secret@127.0.0.1:5432/lightr"
-        installed.write_text(f"{original}\n# {marker}\n", encoding="utf-8")
+        """Receivers check it, and localhost is wrong everywhere."""
+        result = cli(tmp_path / "config.yaml", "setup")
 
-        result = cli(installed, "init", "--force", "--data-dir", str(tmp_path / "d2"))
+        assert "localhost" in result.output
 
-        assert result.exit_code == 0
-        copies = list(installed.parent.glob("*.replaced-*"))
-        assert len(copies) == 1
-        assert marker in copies[0].read_text(encoding="utf-8")
-
-    def test_it_says_the_config_was_replaced_not_merged(
-        self, installed: Path, tmp_path: Path
+    def test_the_hostname_can_be_set_without_touching_anything_else(
+        self, tmp_path: Path
     ) -> None:
-        result = cli(installed, "init", "--force", "--data-dir", str(tmp_path / "d3"))
+        target = tmp_path / "config.yaml"
+        assert cli(target, "setup").exit_code == 0
 
-        assert "replaced, not merged" in result.output
+        result = cli(target, "setup", "--hostname", "mail.example.com")
+
+        assert result.exit_code == 0, result.output
+        assert Config.load(target).server.hostname == "mail.example.com"
+
+    def test_there_is_no_force_flag(self, installed: Path) -> None:
+        """The flag that overwrote a working config is gone, not
+        renamed."""
+        result = cli(installed, "setup", "--force")
+
+        assert result.exit_code != 0

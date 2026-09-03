@@ -33,7 +33,7 @@ class TestInternalKey:
         assert all(len(k) >= 32 for k in keys)
 
     def test_generation_refuses_without_a_key(self, cfg: Config) -> None:
-        with pytest.raises(DovecotConfigError, match="lightr dovecot setup"):
+        with pytest.raises(DovecotConfigError, match="lightr setup"):
             generate(cfg)
 
 

@@ -2,7 +2,7 @@
 
 The database URL comes from Lightr's own config rather than
 alembic.ini, so migrations always target the same database the engine
-uses. Override with LIGHTR_CONFIG to migrate a different install.
+uses. Pass -x config=<path> to migrate a different install.
 """
 
 from __future__ import annotations

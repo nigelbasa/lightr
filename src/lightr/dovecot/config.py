@@ -278,7 +278,7 @@ def generate(cfg: Config, *, api_base_url: str | None = None) -> list[GeneratedF
     base = api_base_url or _default_api_url(cfg)
     if not cfg.dovecot.internal_key:
         raise DovecotConfigError(
-            "no internal auth key is set. Run: lightr dovecot setup"
+            "no internal auth key is set. Run: lightr setup"
         )
 
     return [

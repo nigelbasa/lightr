@@ -13,7 +13,7 @@ from typing import Annotated
 
 import typer
 
-from lightr import __version__
+from lightr import __version__, configtemplate
 
 from . import (
     accounts,
@@ -148,7 +148,7 @@ def status(
     database = report["database"]
     assert isinstance(database, dict)
     if not database["reachable"]:
-        output.stderr.print("[red]Database unreachable.[/red] Try: lightr init")
+        output.stderr.print("[red]Database unreachable.[/red] Try: lightr setup")
         raise typer.Exit(1)
     if not database["up_to_date"]:
         output.warn("Schema is out of date. Run: lightr migrate")
@@ -245,10 +245,18 @@ def serve() -> None:
         output.stderr.print("\nRefusing to start. Run: lightr preflight")
         raise typer.Exit(1)
 
-    # Reconcile on every start. An install that drifted -- a
-    # hand-edited conf, a package upgrade that replaced a file -- comes
-    # back into line without anyone noticing it had gone.
-    _configure_dovecot(cfg, state.config_path or type(cfg).default_path())
+    # Report drift, do not correct it. Writing Dovecot's configuration
+    # from the running service would mean granting the mail engine
+    # write access to /etc/dovecot for the life of the process, which
+    # is a worse trade than an operator running one command.
+    from lightr.dovecot.manage import DovecotManager
+
+    stale = DovecotManager(cfg).drift()
+    if stale:
+        output.warn(
+            f"Dovecot's configuration is out of date ({', '.join(stale)}). "
+            "Run: lightr dovecot install"
+        )
 
     try:
         asyncio.run(Server(cfg).serve_forever())
@@ -260,72 +268,69 @@ def serve() -> None:
 
 
 @app.command()
-def init(
-    data_dir: Annotated[Path | None, typer.Option("--data-dir")] = None,
+def setup(
     hostname: Annotated[
         str | None, typer.Option("--hostname", help="This server's hostname.")
     ] = None,
-    force: Annotated[bool, typer.Option("--force", help="Overwrite an existing config.")] = False,
+    data_dir: Annotated[
+        Path | None,
+        typer.Option("--data-dir", help="Where the database and Sieve scripts live."),
+    ] = None,
 ) -> None:
-    """Create a config file and initialise the database."""
+    """Prepare this machine to run Lightr. Safe to run again.
+
+    The package runs this on install, so most operators never type it.
+    It writes /etc/lightr/config.yaml if there is nothing there, brings
+    the schema up to date, generates the secrets Dovecot needs, and
+    configures Dovecot.
+
+    Every step is idempotent and none of them replace a file that
+    already exists. There is deliberately no --force: the config file
+    holds the keys a running install authenticates with, and the
+    command that overwrote it cost an afternoon once already.
+    """
     from lightr.config import Config
     from lightr.db import migrate as migrations
 
     target = state.config_path or Config.default_path()
-    if target.exists() and not force:
-        output.stderr.print(
-            f"[red]{target} already exists.[/red] Pass --force to overwrite it, "
-            "or edit it directly.\n"
-            "To re-apply only the Dovecot side, use: lightr dovecot setup"
-        )
-        raise typer.Exit(1)
 
-    replaced: Path | None = None
     if target.exists():
-        # --force rewrites the whole file, not just the parts `init`
-        # cares about -- a database DSN, TLS paths, and anything else
-        # hand-edited go with it. Keeping a copy turns that from a loss
-        # into an inconvenience.
-        from datetime import UTC, datetime
-
-        stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
-        replaced = target.with_suffix(f"{target.suffix}.replaced-{stamp}")
+        output.info(f"Using {target}")
+    else:
         try:
-            replaced.write_bytes(target.read_bytes())
-            replaced.chmod(0o600)
-        except OSError as exc:  # pragma: no cover - unwritable directory
-            output.warn(f"could not back up {target}: {exc}")
-            replaced = None
+            configtemplate.write(target)
+        except OSError as exc:
+            output.stderr.print(f"[red]could not write {target}:[/red] {exc}")
+            raise typer.Exit(1) from exc
+        output.success(f"Wrote {target}")
 
-    overrides: dict[str, object] = {}
-    if data_dir:
-        overrides["data_dir"] = str(data_dir)
+    settings: dict[tuple[str, str], object] = {}
     if hostname:
-        overrides["server"] = {"hostname": hostname}
-    cfg = Config.model_validate(overrides)
+        settings[("server", "hostname")] = hostname
+    if data_dir:
+        settings[("data_dir", "")] = data_dir.as_posix()
+    for name in configtemplate.set_values(target, settings):
+        output.success(f"Set {name}")
 
-    try:
-        cfg.save(target)
-    except OSError as exc:
-        output.stderr.print(f"[red]could not write {target}:[/red] {exc}")
-        raise typer.Exit(1) from exc
+    # Reload from disk either way: what was just written is the truth.
+    state.use(target)
+    state.reload()
 
-    state.set_config(cfg)
+    cfg = state.config
     migrations.upgrade(cfg)
-
-    output.success(f"Wrote {target}")
-    if replaced is not None:
-        output.warn(
-            f"The previous config was replaced, not merged. Anything you had "
-            f"edited into it -- a database DSN, TLS paths -- is in {replaced}"
-        )
-    output.success(f"Initialised database at {cfg.database.path}")
+    output.success("Database schema is up to date")
 
     # Dovecot is an internal component, so configuring it is part of
-    # initialising -- not a second command an operator has to know to
-    # run, and not something they can forget.
+    # setting up -- not a second command an operator has to know about,
+    # and not one they can forget.
     _configure_dovecot(cfg, target)
+    configtemplate.restrict(target)
 
+    if cfg.server.hostname == "localhost":
+        output.warn(
+            "server.hostname is still 'localhost'. Receivers check it -- set it "
+            f"to this server's name in {target}, or run: lightr setup --hostname ..."
+        )
     output.info("Next: lightr domain create <your-domain>")
 
 

@@ -80,7 +80,7 @@ rollback, and they stay the rollback long after it looks fine.
 
 ```bash
 pip install 'lightr[postgres,imap]'
-lightr init --hostname mail.example.com
+lightr setup --hostname mail.example.com
 ```
 
 Then set in `/etc/lightr/config.yaml`:
@@ -95,7 +95,7 @@ database:
 lightr migrate && lightr status
 ```
 
-`init` configures Dovecot as part of its job. If it warns, stop and
+`setup` configures Dovecot as part of its job. If it warns, stop and
 read the warning — mailboxes will not work until it is resolved, and
 the import in step 6 goes through IMAP.
 

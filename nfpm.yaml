@@ -1,9 +1,11 @@
 # nfpm packaging for the .deb.
 #
 # The package depends on Dovecot: Lightr does not serve IMAP, so an
-# install without it has no mailboxes. dovecot-lua is what the passdb
-# script needs, and is easy to miss because Dovecot starts fine
-# without it and only fails at login time.
+# install without it has no mailboxes. dovecot-sqlite is the one that
+# is easy to miss -- Dovecot starts fine without it and only fails at
+# delivery time, with "Unknown database driver", which points at
+# nothing. Postgres installs also need dovecot-pgsql; `lightr
+# preflight` names it.
 name: lightr
 arch: all
 platform: linux
@@ -27,10 +29,8 @@ depends:
   - dovecot-lmtpd
   - dovecot-sieve
   - dovecot-sqlite
-  - dovecot-auth-lua
-recommends:
-  - dovecot-managesieved
 suggests:
+  - dovecot-pgsql
   - postgresql-client
   - rspamd
 
@@ -65,8 +65,11 @@ contents:
       owner: lightr
       group: lightr
 
-  # Never replaced on upgrade: it holds the admin key and the Dovecot
-  # internal secret, and regenerating either breaks a running install.
+  # /etc/lightr/config.yaml is written by `lightr setup` in postinst,
+  # not shipped as a conffile: it gains generated secrets on first
+  # setup, and a conffile dpkg believes it owns would prompt about
+  # "local changes" on every upgrade for a file the package itself
+  # caused to differ.
   - src: ./lightr.yaml.example
     dst: /etc/lightr/config.yaml.example
     type: config|noreplace
