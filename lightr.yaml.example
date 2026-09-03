@@ -67,6 +67,17 @@ database:
 #   url: https://example.com/lightr/events
 #   enabled: false
 
+# limits:
+#   # Rate limiting, not DDoS protection: these refuse more work than a
+#   # caller is entitled to before it reaches the database or Dovecot.
+#   # A flood big enough to fill the link is answered upstream. Counted
+#   # in this process, so a second Lightr enforces its own copy. Zero
+#   # means unlimited.
+#   auth_failures_per_minute: 20    # per address, guessing an API key
+#   api_requests_per_minute: 600    # per address; keys carry their own
+#   smtp_sessions_per_minute: 30    # per address, inbound only
+#   smtp_messages_per_hour: 300     # per address, inbound only
+
 # logging:
 #   level: info
 #   file: /var/log/lightr/lightr.log

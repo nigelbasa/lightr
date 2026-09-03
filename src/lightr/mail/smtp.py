@@ -32,6 +32,7 @@ from lightr.config import Config
 from lightr.dovecot.lmtp import LMTPClient, LMTPError
 from lightr.mail import headers as header_tools
 from lightr.mail.routing import RejectReason, Route, Router
+from lightr.ratelimit import limiter
 
 log = logging.getLogger("lightr.smtp")
 
@@ -82,6 +83,20 @@ class LightrHandler:
         self.require_auth = require_auth
         self.lmtp = LMTPClient(cfg.dovecot)
 
+        # Only the receive listener is limited by address. Submission
+        # is authenticated, so its budget belongs to the account, and
+        # limiting it by address would punish an office behind one NAT.
+        self.sessions = (
+            None
+            if require_auth
+            else limiter(cfg.limits.smtp_sessions_per_minute, 60.0)
+        )
+        self.messages = (
+            None
+            if require_auth
+            else limiter(cfg.limits.smtp_messages_per_hour, 3600.0)
+        )
+
         from lightr.webhooks.emitter import Emitter
 
         # Fire-and-forget: a slow webhook receiver must not slow down
@@ -89,6 +104,26 @@ class LightrHandler:
         self.webhooks = Emitter(engine, allow_private=cfg.webhook.allow_private)
 
     # -- envelope phases ------------------------------------------------
+
+    async def handle_EHLO(  # noqa: N802 - aiosmtpd's naming
+        self,
+        server: object,
+        session: Session,
+        envelope: Envelope,
+        hostname: str,
+        responses: list[str],
+    ) -> list[str]:
+        """Greet, or refuse an address opening sessions too fast.
+
+        421 is the right code: it means "not now, come back", so a real
+        sender retries and a flood is turned away before it costs a
+        database round trip. Returning it here rather than at DATA is
+        the point -- by DATA the message is already in memory.
+        """
+        session.host_name = hostname
+        if self.sessions is not None and not self.sessions.allow(_peer_ip(session)):
+            return ["421 4.7.0 Too many connections, please slow down"]
+        return responses
 
     async def handle_MAIL(  # noqa: N802 - aiosmtpd's naming
         self,
@@ -135,6 +170,9 @@ class LightrHandler:
         raw = envelope.content
         if not isinstance(raw, bytes):
             raw = str(raw).encode("utf-8")
+
+        if self.messages is not None and not self.messages.allow(_peer_ip(session)):
+            return "421 4.7.0 Too many messages, please slow down"
 
         if len(raw) > self.cfg.smtp.max_message_bytes:
             return (

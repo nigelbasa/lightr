@@ -23,13 +23,14 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from lightr import __version__
-from lightr.api.auth import AuthError, Principal, authenticate
+from lightr.api.auth import AuthError, Principal, authenticate, client_ip
 from lightr.api.internal import INTERNAL_PATHS, INTERNAL_ROUTES
 from lightr.api.mailbox import MAILBOX_ROUTES
 from lightr.apikeys import APIKeyError, APIKeyRepo, KeyType, Permission
 from lightr.config import Config
 from lightr.db.engine import create_engine, ping
 from lightr.models import Account, Alias, AuthMode, Domain, Organization
+from lightr.ratelimit import KeyLimiter, limiter
 from lightr.repo import (
     AccountRepo,
     AliasRepo,
@@ -55,6 +56,20 @@ def ok(payload: Any, status: int = 200) -> JSONResponse:
 
 def error(status: int, message: str, **extra: Any) -> JSONResponse:
     return JSONResponse({"error": message, **extra}, status)
+
+
+def too_many(retry_after: int) -> JSONResponse:
+    """429 with a Retry-After, so a client can behave.
+
+    A limit that does not say when to come back trains callers to
+    retry immediately, which is the traffic the limit was meant to
+    stop.
+    """
+    return JSONResponse(
+        {"error": f"rate limited -- retry in {retry_after}s"},
+        429,
+        headers={"Retry-After": str(retry_after)},
+    )
 
 
 def dump(record: Any) -> dict[str, Any]:
@@ -614,16 +629,49 @@ def create_app(cfg: Config, engine: AsyncEngine | None = None) -> Starlette:
     owned_engine = engine is None
     engine = engine or create_engine(cfg)
 
+    # Two limiters, because the two failures are different. An address
+    # failing to authenticate is guessing at a key and gets a small
+    # budget; a key that has authenticated is a paying tenant and gets
+    # whatever its own rate_limit says.
+    failures = limiter(cfg.limits.auth_failures_per_minute, 60.0)
+    anonymous = limiter(cfg.limits.api_requests_per_minute, 60.0)
+    per_key = KeyLimiter()
+
     async def middleware(request: Request, call_next: Handler) -> Response:
-        """Open a transaction, authenticate, and translate errors."""
+        """Open a transaction, authenticate, limit, and translate errors."""
+        address = client_ip(request) or "unknown"
         try:
             async with engine.begin() as conn:
                 request.state.conn = conn
                 if request.url.path not in PUBLIC_PATHS:
-                    request.state.principal = await authenticate(request)
+                    # Cheap first: refuse an address that is guessing
+                    # before spending a database round trip on it.
+                    if anonymous is not None and not anonymous.allow(address):
+                        return too_many(anonymous.retry_after(address))
+
+                    try:
+                        request.state.principal = await authenticate(request)
+                    except AuthError:
+                        if failures is not None and not failures.allow(address):
+                            return too_many(failures.retry_after(address))
+                        raise
+
+                    key = request.state.principal.key
+                    wait = per_key.check(
+                        str(key.id), key.rate_limit, key.daily_limit
+                    )
+                    if wait is not None:
+                        return too_many(wait)
+
+                    # It authenticated, so it was not a guess. Give the
+                    # address its failure budget back -- otherwise a
+                    # busy office behind one NAT locks itself out by
+                    # mistyping a key a few times.
+                    if failures is not None:
+                        failures.forget(address)
+
                     await APIKeyRepo(conn).record_use(
-                        request.state.principal.key.id,
-                        request.headers.get("X-Forwarded-For"),
+                        key.id, request.headers.get("X-Forwarded-For")
                     )
                 return await call_next(request)
         except AuthError as exc:

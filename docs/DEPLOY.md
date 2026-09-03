@@ -240,6 +240,72 @@ certbot certonly --standalone -d mail.example.com
 systemctl reload lightr
 ```
 
+### Where encryption terminates
+
+Worth stating plainly, because "we support TLS" without saying where it
+terminates is how people end up serving plaintext on a public
+interface.
+
+| Surface | Encrypted by | Notes |
+| --- | --- | --- |
+| SMTP receive (:25) | Lightr, STARTTLS | Opportunistic. It has to be: a sending server that will not do TLS is still delivering you mail. |
+| Submission (:587) | Lightr, STARTTLS | Required. `security.require_tls_for_auth` is on by default and refuses a password in the clear. |
+| IMAP (:143, :993) | Dovecot | Dovecot's own certificate, configured where its certificate always was. |
+| Outbound relay | Lightr, opportunistic | Encrypted where the receiver offers it. |
+| **HTTP API (:8080)** | **nothing — put a proxy in front** | Plain HTTP. |
+| Dovecot → Lightr auth | nothing, and it does not cross a network | Loopback only. |
+
+The API is the one that needs a decision. Lightr does not terminate TLS
+for it, deliberately: a mail engine is a bad place to keep a web
+server's certificate rotation working, and every deployment already has
+something that does it well. Put nginx or Caddy in front, and keep
+Lightr on loopback:
+
+```yaml
+# /etc/lightr/config.yaml
+http:
+  addr: "127.0.0.1:8080"
+```
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name api.example.com;
+    ssl_certificate     /etc/letsencrypt/live/api.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        # Lightr trusts the *last* entry, so a client cannot forge it.
+        proxy_set_header X-Forwarded-For $remote_addr;
+    }
+}
+```
+
+The default `addr: ":8080"` binds every interface. That is fine behind
+a firewall and wrong on a public host, so decide which you have.
+
+The endpoints Dovecot uses to check passwords are on that same port and
+see plaintext passwords, which is the reason they are refused unless
+the caller presents the internal key — and the reason to keep the
+listener on loopback rather than relying on that alone.
+
+### Rate limits
+
+Set in the `limits` block, and enforced in one process — two Lightrs
+behind a load balancer each enforce their own copy, so the effective
+limit is doubled. Defaults are in `/etc/lightr/config.yaml`.
+
+This is rate limiting, not DDoS protection. It refuses more work than a
+caller is entitled to before that work reaches the database or Dovecot.
+It does nothing about a flood large enough to fill the link or exhaust
+the accept queue; that is answered upstream, by your provider or by
+something in front of the host.
+
+Per-key limits come from the key itself (`rate_limit` per minute and
+`daily_limit`), so a tenant that needs more can be given more without
+raising it for everyone. Zero means unlimited, everywhere.
+
 ---
 
 ## 3. Check it works

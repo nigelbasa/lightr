@@ -173,6 +173,30 @@ class SecurityConfig(_Base):
     require_tls_for_auth: bool = True
 
 
+class LimitsConfig(_Base):
+    """Caps that refuse work before it costs anything.
+
+    Rate limiting, not DDoS protection -- see ``lightr/ratelimit.py``.
+    Counted in this process, so a second Lightr behind a load balancer
+    enforces its own copy of each limit.
+    """
+
+    #: Failed API-key attempts per minute per address. Guessing a key
+    #: is 256 bits of work; this makes it slow work as well.
+    auth_failures_per_minute: int = 20
+
+    #: Requests per minute per address for a key that has no
+    #: rate_limit of its own. Keys carry their own; this is the floor.
+    api_requests_per_minute: int = 600
+
+    #: SMTP sessions per minute per address, on the receive listener.
+    #: Submission is authenticated and limited by the key instead.
+    smtp_sessions_per_minute: int = 30
+
+    #: Messages per hour per address, on the receive listener.
+    smtp_messages_per_hour: int = 300
+
+
 class Config(_Base):
     data_dir: Path = DEFAULT_DATA_DIR
     server: ServerConfig = Field(default_factory=ServerConfig)
@@ -187,6 +211,7 @@ class Config(_Base):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     spam: SpamConfig = Field(default_factory=SpamConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
+    limits: LimitsConfig = Field(default_factory=LimitsConfig)
 
     @model_validator(mode="after")
     def _normalise(self) -> Self:
