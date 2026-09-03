@@ -186,12 +186,37 @@ class TestRuleConversion:
         assert rule.conditions == []
 
 
+class NoDoveadm:
+    """A doveadm that is not installed.
+
+    Without this the test result depends on the machine: a developer
+    laptop has no doveadm and exercises the file-writing path, while a
+    real mail server has one and shells out to a Dovecot that knows
+    nothing about ops@acme.test. Eight of these failed the first time
+    the suite was run on a server -- and the failure that made this
+    rewrite expensive was a seam that only ever ran under a fake.
+
+    The doveadm path is covered separately, against a fake that
+    records what it was asked to do.
+    """
+
+    available = False
+
+    async def install_sieve(self, user: str, script: str) -> None:  # pragma: no cover
+        raise AssertionError("this installer should not reach doveadm")
+
+
+@pytest.fixture
+def offline() -> NoDoveadm:
+    return NoDoveadm()
+
+
 class TestInstallation:
     async def test_installs_a_script(
-        self, conn: AsyncConnection, account: Account, cfg
+        self, conn: AsyncConnection, account: Account, cfg, offline
     ) -> None:
         await _add_rule(conn, account)
-        installer = SieveInstaller(conn, cfg.dovecot.sieve_dir)
+        installer = SieveInstaller(conn, cfg.dovecot.sieve_dir, doveadm=offline)
 
         result = await installer.install(account.id, "ops@acme.test")
 
@@ -200,30 +225,30 @@ class TestInstallation:
         assert 'fileinto :create "Invoices";' in result.path.read_text(encoding="utf-8")
 
     async def test_no_rules_still_writes_a_valid_script(
-        self, conn: AsyncConnection, account: Account, cfg
+        self, conn: AsyncConnection, account: Account, cfg, offline
     ) -> None:
         """Dovecot needs a script it can parse, even an empty one."""
-        installer = SieveInstaller(conn, cfg.dovecot.sieve_dir)
+        installer = SieveInstaller(conn, cfg.dovecot.sieve_dir, doveadm=offline)
         result = await installer.install(account.id, "ops@acme.test")
 
         assert "No active rules" in result.path.read_text(encoding="utf-8")
 
     async def test_inactive_rules_are_excluded(
-        self, conn: AsyncConnection, account: Account, cfg
+        self, conn: AsyncConnection, account: Account, cfg, offline
     ) -> None:
         await _add_rule(conn, account, is_active=False)
-        installer = SieveInstaller(conn, cfg.dovecot.sieve_dir)
+        installer = SieveInstaller(conn, cfg.dovecot.sieve_dir, doveadm=offline)
 
         result = await installer.install(account.id, "ops@acme.test")
         assert result.rules == 0
 
     async def test_rules_are_ordered_by_priority(
-        self, conn: AsyncConnection, account: Account, cfg
+        self, conn: AsyncConnection, account: Account, cfg, offline
     ) -> None:
         await _add_rule(conn, account, name="Later", priority=900)
         await _add_rule(conn, account, name="Sooner", priority=1)
 
-        installer = SieveInstaller(conn, cfg.dovecot.sieve_dir)
+        installer = SieveInstaller(conn, cfg.dovecot.sieve_dir, doveadm=offline)
         content = (await installer.install(account.id, "ops@acme.test")).path.read_text(
             encoding="utf-8"
         )
@@ -231,10 +256,10 @@ class TestInstallation:
         assert content.index("# Sooner") < content.index("# Later")
 
     async def test_reinstalling_unchanged_rules_is_a_no_op(
-        self, conn: AsyncConnection, account: Account, cfg
+        self, conn: AsyncConnection, account: Account, cfg, offline
     ) -> None:
         await _add_rule(conn, account)
-        installer = SieveInstaller(conn, cfg.dovecot.sieve_dir)
+        installer = SieveInstaller(conn, cfg.dovecot.sieve_dir, doveadm=offline)
 
         await installer.install(account.id, "ops@acme.test")
         second = await installer.install(account.id, "ops@acme.test")
@@ -242,12 +267,12 @@ class TestInstallation:
         assert not second.changed
 
     async def test_generation_timestamp_is_recorded(
-        self, conn: AsyncConnection, account: Account, cfg
+        self, conn: AsyncConnection, account: Account, cfg, offline
     ) -> None:
         from sqlalchemy import select
 
         await _add_rule(conn, account)
-        await SieveInstaller(conn, cfg.dovecot.sieve_dir).install(
+        await SieveInstaller(conn, cfg.dovecot.sieve_dir, doveadm=offline).install(
             account.id, "ops@acme.test"
         )
 
@@ -257,19 +282,19 @@ class TestInstallation:
         assert stamp is not None
 
     async def test_install_all_covers_every_account(
-        self, conn: AsyncConnection, account: Account, cfg
+        self, conn: AsyncConnection, account: Account, cfg, offline
     ) -> None:
         domain_id = account.domain_id
         await AccountRepo(conn).create(
             Account(domain_id=domain_id, local_part="team")
         )
 
-        results = await SieveInstaller(conn, cfg.dovecot.sieve_dir).install_all()
+        results = await SieveInstaller(conn, cfg.dovecot.sieve_dir, doveadm=offline).install_all()
 
         assert {r.email for r in results} == {"ops@acme.test", "team@acme.test"}
 
     async def test_one_broken_rule_does_not_stop_the_others(
-        self, conn: AsyncConnection, account: Account, cfg
+        self, conn: AsyncConnection, account: Account, cfg, offline
     ) -> None:
         """One bad rule must not leave every other mailbox unfiltered."""
         other = await AccountRepo(conn).create(
@@ -282,6 +307,6 @@ class TestInstallation:
         )
         await _add_rule(conn, other)
 
-        results = await SieveInstaller(conn, cfg.dovecot.sieve_dir).install_all()
+        results = await SieveInstaller(conn, cfg.dovecot.sieve_dir, doveadm=offline).install_all()
 
         assert [r.email for r in results] == ["team@acme.test"]

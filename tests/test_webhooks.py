@@ -231,8 +231,16 @@ class TestDelivery:
         assert "private or reserved" in attempt.error
 
     async def test_an_unreachable_endpoint_is_retryable(self) -> None:
+        """The port is found, not assumed.
+
+        This hard-coded 9000, and on a real server something was
+        listening there -- so it got a 404, a permanent failure, and
+        asserted the opposite of what it meant to. SSRF vetting allows
+        only a handful of ports, so the test has to pick one of those
+        that is genuinely closed rather than one that looks unused.
+        """
         hook = Webhook(
-            id=uuid4(), name="down", url="http://127.0.0.1:9000/hook",
+            id=uuid4(), name="down", url=f"http://127.0.0.1:{_closed_port()}/hook",
             secret=SECRET, timeout=2,
         )
 
@@ -242,6 +250,20 @@ class TestDelivery:
 
         assert not attempt.ok
         assert attempt.retryable
+
+
+def _closed_port() -> int:
+    """An allowed port with nothing listening on it, on this machine."""
+    import socket
+
+    from lightr.webhooks.ssrf import ALLOWED_PORTS
+
+    for port in sorted(ALLOWED_PORTS):
+        with socket.socket() as probe:
+            probe.settimeout(0.5)
+            if probe.connect_ex(("127.0.0.1", port)) != 0:
+                return port
+    pytest.skip("every allowed port is in use on this machine")
 
 
 @pytest_asyncio.fixture
