@@ -60,7 +60,9 @@ class TestAPIKeys:
             "--type", "account", "--account", "ops@acme.test",
         )
         assert result.exit_code == 0, result.output
-        assert "account" in result.output
+        # The address, not the account's UUID: which mailbox a key was
+        # just cut for is the one thing the operator needs to read back.
+        assert "ops@acme.test" in result.output
 
     def test_rotate_replaces_the_secret(self, installed: Path) -> None:
         cli(installed, "apikey", "create", "ci", "--type", "admin")

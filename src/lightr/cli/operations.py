@@ -7,9 +7,11 @@ mail.
 
 from __future__ import annotations
 
+import sys
 from datetime import timedelta
 from typing import Annotated
 
+import click
 import typer
 
 from lightr.apikeys import APIKeyRepo, KeyType
@@ -67,7 +69,12 @@ def list_keys(
 
 @apikey_app.command("create")
 def create_key(
-    name: Annotated[str, typer.Argument(help="A name you will recognise later.")],
+    name: Annotated[
+        str | None,
+        typer.Argument(
+            help="A name you will recognise later. Omit it to be asked."
+        ),
+    ] = None,
     key_type: Annotated[KeyType, typer.Option("--type")] = KeyType.ORG,
     org: Annotated[str | None, typer.Option("--org")] = None,
     domain: Annotated[str | None, typer.Option("--domain")] = None,
@@ -82,7 +89,23 @@ def create_key(
         int | None, typer.Option("--expires-in", help="Days until it expires.")
     ] = None,
 ) -> None:
-    """Create an API key. The secret is shown once and never again."""
+    """Create an API key. The secret is shown once and never again.
+
+    Run it with no arguments to be walked through it: what the key
+    should be able to reach, which tenant that is, and when it expires.
+    Handing someone a key is the one operator task most likely to be
+    done by somebody who has never read this help text.
+    """
+    if name is None:
+        if not interactive():
+            output.stderr.print(
+                "[red]No name given.[/red] Pass one, or run this in a terminal "
+                "to be asked:\n  lightr apikey create <name> --domain example.com"
+            )
+            raise typer.Exit(1)
+        name, key_type, org, domain, account, expires_in = _ask_about_the_key(
+            org=org, domain=domain, account=account
+        )
 
     async def _run() -> tuple[object, str]:
         async with db() as conn:
@@ -112,8 +135,104 @@ def create_key(
             )
 
     key, secret = run(_run)
-    output.success(f"Created {key.name} ({key.prefix}...) for {key.scope_description()}")
+    # The name, not the id. `scope_description` can only reach for the
+    # UUID, and "domain ac82efec-..." tells an operator nothing about
+    # which domain they just handed someone a key to.
+    scope = account or domain or org or key.scope_description()
+    output.success(f"Created {key.name} ({key.prefix}...) for {scope}")
     output.secret("API key", secret)
+
+
+def interactive() -> bool:
+    """Whether there is somebody there to answer a question.
+
+    A separate function so a script that omits the key name gets an
+    error rather than a prompt nothing will ever answer.
+    """
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):  # pragma: no cover - closed stdin
+        return False
+
+
+#: What each scope means, in the words an operator would use. Shown
+#: rather than the enum, because "org" and "domain" only look obvious
+#: to whoever wrote the schema.
+SCOPES: tuple[tuple[KeyType, str], ...] = (
+    (KeyType.ORG, "an organization -- every domain and mailbox it owns"),
+    (KeyType.DOMAIN, "one domain -- its mailboxes, and sending as it"),
+    (KeyType.ACCOUNT, "one mailbox -- reading it and sending as it"),
+    (KeyType.ADMIN, "everything on this server, including other tenants"),
+)
+
+
+def _ask_about_the_key(
+    *, org: str | None, domain: str | None, account: str | None
+) -> tuple[str, KeyType, str | None, str | None, str | None, int | None]:
+    """Walk an operator through creating a key.
+
+    Reads the tenants up front and offers them as a list. Asking
+    someone to type an organization name they have not seen is how you
+    get a key scoped to a tenant that does not exist -- which fails
+    only later, when someone tries to use it.
+    """
+    tenants = run(_tenants)
+
+    output.stdout.print("What should this key be able to reach?")
+    for number, (_, description) in enumerate(SCOPES, start=1):
+        output.stdout.print(f"  {number}. {description}")
+    choice = typer.prompt("Choose", type=click.IntRange(1, len(SCOPES)), default=2)
+    key_type = SCOPES[choice - 1][0]
+
+    if key_type is KeyType.ORG and org is None:
+        org = _pick("organization", tenants["organizations"])
+    elif key_type is KeyType.DOMAIN and domain is None:
+        domain = _pick("domain", tenants["domains"])
+    elif key_type is KeyType.ACCOUNT and account is None:
+        account = _pick("mailbox", tenants["accounts"])
+    elif key_type is KeyType.ADMIN:
+        output.warn(
+            "An admin key can read and change every tenant on this server. "
+            "Scope it to one of them instead unless it is for you."
+        )
+
+    subject = account or domain or org or "server"
+    name = typer.prompt("A name you will recognise later", default=f"{subject} key")
+
+    expires_in: int | None = None
+    if typer.confirm("Should it expire?", default=False):
+        expires_in = typer.prompt("Days until it expires", type=int, default=90)
+
+    return name, key_type, org, domain, account, expires_in
+
+
+async def _tenants() -> dict[str, list[str]]:
+    async with db() as conn:
+        return {
+            "organizations": [
+                o.name for o in await OrganizationRepo(conn).list(limit=1000)
+            ],
+            "domains": [d.name for d in await DomainRepo(conn).list(limit=1000)],
+            "accounts": [a.email for a in await AccountRepo(conn).list(limit=1000)],
+        }
+
+
+def _pick(what: str, options: list[str]) -> str:
+    """Choose from a list, or type a name if the list is empty."""
+    if not options:
+        output.warn(f"There are no {what}s yet.")
+        return typer.prompt(f"Which {what}")
+
+    if len(options) == 1:
+        output.info(f"Using the only {what}: {options[0]}")
+        return options[0]
+
+    for number, option in enumerate(options, start=1):
+        output.stdout.print(f"  {number}. {option}")
+    chosen = typer.prompt(
+        f"Which {what}", type=click.IntRange(1, len(options)), default=1
+    )
+    return options[chosen - 1]
 
 
 @apikey_app.command("revoke")
