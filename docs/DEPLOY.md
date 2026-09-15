@@ -151,7 +151,7 @@ apt update
 # Python 3.11+ is required. Ubuntu 22.04 ships 3.10, so add the PPA
 # there first: add-apt-repository ppa:deadsnakes/ppa
 apt install -y python3.12 python3.12-venv \
-  dovecot-core dovecot-imapd dovecot-lmtpd dovecot-sieve dovecot-auth-lua
+  dovecot-core dovecot-imapd dovecot-lmtpd dovecot-sieve
 
 adduser --system --group --home /var/lib/lightr --shell /usr/sbin/nologin lightr
 adduser dovecot lightr          # Dovecot reads the Sieve scripts Lightr writes
@@ -191,6 +191,33 @@ chmod 640 /etc/lightr/config.yaml
 key and master user, writes Dovecot's configuration, verifies it with
 `doveconf`, and reloads. There is no separate Dovecot step. If it
 warns, read the warning; mailboxes will not work until it is resolved.
+
+It also edits one stock Dovecot file. Debian's and Ubuntu's
+`/etc/dovecot/conf.d/10-auth.conf` ends with
+`!include auth-system.conf.ext`, which declares a PAM passdb. Dovecot
+tries passdbs in the order they appear, and `10-auth.conf` loads before
+Lightr's `99-lightr.conf`, so every IMAP login went to PAM first. That
+logged a PAM failure for each login and added PAM's failure delay before
+Lightr was asked. Dovecot 2.3 cannot remove a passdb declared earlier,
+so `setup` (and `lightr dovecot install`) comments that line out:
+
+```
+# Disabled by Lightr, which authenticates every login itself.
+# PAM was being tried first on each one. See docs/DEPLOY.md.
+#!include auth-system.conf.ext
+```
+
+The original is saved next to it as
+`10-auth.conf.lightr-<timestamp>.bak`, and the edit is rolled back with
+everything else if `doveconf` rejects the result. To undo it, remove the
+`#` and run `systemctl reload dovecot`.
+
+Because `10-auth.conf` is a dpkg conffile, an upgrade of `dovecot-core`
+that changes it asks whether to keep your version. Keep it (`N`). If the
+stock file comes back anyway, `lightr preflight` and `lightr serve` warn
+about `dovecot-pam`, and `lightr dovecot install` fixes it again. You
+can also do it by hand: comment out `!include auth-system.conf.ext` in
+`/etc/dovecot/conf.d/10-auth.conf`, then run `systemctl reload dovecot`.
 
 ### Postgres
 
@@ -471,6 +498,18 @@ lightr suppression check them@example.com # why did mail to them stop?
 lightr queue list --status failed        # what failed to send, and why
 ```
 
+If Dovecot's log shows `pam_unix(dovecot:auth): check pass; user unknown`
+on every IMAP login, the stock PAM passdb is still active and runs
+before Lightr's. See **Configure** above. The fix is
+`lightr dovecot install`.
+
+A current install can have files `serve` cannot read, because they hold
+the internal key and the database DSN (`lightr-checkpassword`,
+`lightr-userdb.conf.ext`, readable only by root and Dovecot). `serve`
+does not call those out of date. It logs that they were not checked. To
+check them, run `lightr dovecot install` as root; if they are already
+current, it changes nothing.
+
 ### Offloaded authentication
 
 Accounts authenticate against a local password by default. To point
@@ -615,8 +654,15 @@ lightr migrate
 systemctl restart lightr
 ```
 
-`serve` re-checks Dovecot's configuration on every start, so an upgrade
-that changes what Dovecot needs applies itself.
+`serve` checks Dovecot's configuration on every start, but only reports
+what is out of date. It never rewrites it, because that would need write
+access to `/etc/dovecot` for as long as it runs. The package runs
+`lightr setup` on upgrade, which applies changes. After a pip upgrade,
+apply them yourself:
+
+```bash
+lightr dovecot install
+```
 
 **Coming from the Go engine:** migration `0003` drops the old
 `messages`, `encryption_keys`, and `encrypted_messages` tables. If any

@@ -94,6 +94,7 @@ class Doveadm:
     ) -> None:
         self._binary = binary
         self._timeout = timeout
+        self.version_commands: list[tuple[str, ...]] = list(VERSION_COMMANDS)
 
     # -- process plumbing ------------------------------------------------
 
@@ -283,7 +284,80 @@ class Doveadm:
         return _as_rows(await self.run_json("who"))
 
     async def version(self) -> str:
-        return (await self.run("--version")).strip()
+        """Dovecot's version, as it reports it: "2.3.16 (7e2e900c1a)".
+
+        Not ``doveadm --version``: Dovecot 2.3's doveadm has no such
+        option, and fails with "invalid option -- '-'". ``dovecot
+        --version`` works on every release, but the binary lives in
+        /usr/sbin, which is not always on an unprivileged user's PATH;
+        ``doveconf -n`` is in /usr/bin and heads its output with the
+        same version. Neither needs doveadm installed.
+        """
+        problems: list[str] = []
+        for argv in self.version_commands:
+            binary = shutil.which(argv[0]) or _sbin(argv[0])
+            if binary is None:
+                problems.append(f"{argv[0]} not found")
+                continue
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    binary, *argv[1:],
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                out, err = await asyncio.wait_for(
+                    process.communicate(), timeout=self._timeout
+                )
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+                problems.append(f"{argv[0]} timed out")
+                continue
+            except (OSError, NotImplementedError) as exc:
+                problems.append(f"{argv[0]}: {exc}")
+                continue
+            if process.returncode:
+                detail = err.decode("utf-8", "replace").strip().splitlines()
+                problems.append(
+                    f"{' '.join(argv)} failed ({process.returncode})"
+                    + (f": {detail[-1]}" if detail else "")
+                )
+                continue
+            version = _parse_version(out.decode("utf-8", "replace"))
+            if version is not None:
+                return version
+            problems.append(f"{' '.join(argv)} did not report a version")
+
+        raise DoveadmError("version", 1, "; ".join(problems) or "nothing to ask")
+
+
+#: How to ask Dovecot its version, in order of preference. A list so
+#: tests can run something other than Dovecot.
+VERSION_COMMANDS: tuple[tuple[str, ...], ...] = (
+    ("dovecot", "--version"),
+    ("doveconf", "-n"),
+)
+
+
+def _sbin(name: str) -> str | None:
+    """Where Debian puts Dovecot's daemon, for a PATH without sbin."""
+    from pathlib import Path
+
+    candidate = Path("/usr/sbin") / name
+    return str(candidate) if candidate.is_file() else None
+
+
+def _parse_version(output: str) -> str | None:
+    """The version from ``dovecot --version`` or ``doveconf -n``.
+
+    The first prints "2.3.16 (7e2e900c1a)"; the second starts with
+    "# 2.3.16 (7e2e900c1a): /etc/dovecot/dovecot.conf".
+    """
+    lines = output.strip().splitlines()
+    if not lines:
+        return None
+    first = lines[0].lstrip("#").strip().split(":", 1)[0].strip()
+    return first if first[:1].isdigit() else None
 
 
 def _as_rows(value: Any) -> list[dict[str, Any]]:

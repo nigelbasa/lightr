@@ -330,7 +330,7 @@ class TestDriftIsReportedNotCorrected:
         the true one."""
         from lightr.dovecot.manage import DovecotManager
 
-        stale = DovecotManager(cfg, conf_dir=tmp_path).drift()
+        stale = DovecotManager(cfg, conf_dir=tmp_path).drift().stale
 
         assert stale
 
@@ -339,7 +339,7 @@ class TestDriftIsReportedNotCorrected:
     ) -> None:
         from lightr.dovecot.manage import DovecotManager
 
-        stale = DovecotManager(configured, conf_dir=tmp_path).drift()
+        stale = DovecotManager(configured, conf_dir=tmp_path).drift().stale
 
         assert "lightr-userdb.conf.ext" in stale
 
@@ -351,7 +351,56 @@ class TestDriftIsReportedNotCorrected:
         manager = DovecotManager(configured, conf_dir=tmp_path)
         _install_into(configured, tmp_path)
 
-        assert manager.drift() == []
+        drift = manager.drift()
+        assert drift.stale == []
+        assert drift.unverifiable == []
+
+    def test_files_this_user_cannot_read_are_not_called_stale(
+        self, configured: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`serve` runs as lightr; the checkpassword script and the
+        userdb conf are root:dovecot because they hold the internal key
+        and the DSN. Reading them failed, that was counted as drift, and
+        every start of a current install said to run `dovecot install`."""
+        from lightr.dovecot.manage import DovecotManager
+
+        manager = DovecotManager(configured, conf_dir=tmp_path)
+        _install_into(configured, tmp_path)
+        protected = {"lightr-checkpassword", "lightr-userdb.conf.ext"}
+        read_text = Path.read_text
+
+        def as_the_service_user(self: Path, *args: object, **kwargs: object) -> str:
+            if self.name in protected:
+                raise PermissionError(13, "Permission denied", str(self))
+            return read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "read_text", as_the_service_user)
+
+        drift = manager.drift()
+        assert drift.stale == []
+        assert sorted(drift.unverifiable) == sorted(protected)
+
+    def test_a_readable_file_that_differs_is_still_stale_beside_unreadable_ones(
+        self, configured: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from lightr.dovecot.config import CONF_NAME
+        from lightr.dovecot.manage import DovecotManager
+
+        manager = DovecotManager(configured, conf_dir=tmp_path)
+        _install_into(configured, tmp_path)
+        (tmp_path / "conf.d" / CONF_NAME).write_text("# edited\n", encoding="utf-8")
+        read_text = Path.read_text
+
+        def as_the_service_user(self: Path, *args: object, **kwargs: object) -> str:
+            if self.name == "lightr-userdb.conf.ext":
+                raise PermissionError(13, "Permission denied", str(self))
+            return read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "read_text", as_the_service_user)
+
+        drift = manager.drift()
+        assert drift.stale == [CONF_NAME]
+        assert drift.unverifiable == ["lightr-userdb.conf.ext"]
 
     def test_a_changed_database_shows_up(self, configured: Config, tmp_path: Path) -> None:
         """Moving to Postgres rewrites the userdb conf. Until it is
@@ -365,7 +414,7 @@ class TestDriftIsReportedNotCorrected:
         configured.database.driver = DatabaseDriver.POSTGRES
         configured.database.dsn = "postgresql://lightr:pw@127.0.0.1:5432/lightr"
 
-        assert "lightr-userdb.conf.ext" in manager.drift()
+        assert "lightr-userdb.conf.ext" in manager.drift().stale
 
 
 def _install_into(cfg: Config, conf_dir: Path) -> None:

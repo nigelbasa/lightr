@@ -267,3 +267,42 @@ class TestTheServiceCanReadItsConfig:
         preflight.check_config_readable(report, path)
 
         assert report.ok
+
+
+class TestSystemAuth:
+    """Ubuntu's 10-auth.conf puts a PAM passdb ahead of Lightr's."""
+
+    def _conf(self, tmp_path: Path, text: str) -> Path:
+        path = tmp_path / "conf.d" / "10-auth.conf"
+        path.parent.mkdir(parents=True)
+        path.write_text(text, encoding="utf-8")
+        return tmp_path
+
+    def test_an_active_include_is_a_warning_with_the_exact_fix(
+        self, tmp_path: Path
+    ) -> None:
+        conf_dir = self._conf(tmp_path, "!include auth-system.conf.ext\n")
+
+        report = preflight.Report()
+        preflight.check_system_auth(report, conf_dir)
+
+        (check,) = report.checks
+        assert check.level is Level.WARN
+        assert report.ok, "logins still work, so it must not refuse to start"
+        assert check.fix is not None
+        assert "lightr dovecot install" in check.fix
+        assert "!include auth-system.conf.ext" in check.fix
+
+    def test_a_commented_include_says_nothing(self, tmp_path: Path) -> None:
+        conf_dir = self._conf(tmp_path, "#!include auth-system.conf.ext\n")
+
+        report = preflight.Report()
+        preflight.check_system_auth(report, conf_dir)
+
+        assert report.checks == []
+
+    def test_no_conf_d_says_nothing(self, tmp_path: Path) -> None:
+        report = preflight.Report()
+        preflight.check_system_auth(report, tmp_path)
+
+        assert report.checks == []

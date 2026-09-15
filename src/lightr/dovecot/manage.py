@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass, field
@@ -64,6 +65,49 @@ class InstallReport:
     @property
     def changed(self) -> bool:
         return any(c.action == "written" for c in self.changes)
+
+
+@dataclass
+class Drift:
+    """How Dovecot's files on disk compare with what Lightr would write."""
+
+    #: Missing, or different from what this config generates.
+    stale: list[str] = field(default_factory=list)
+    #: Present but not readable by whoever is asking, so not compared.
+    unverifiable: list[str] = field(default_factory=list)
+
+
+#: Debian's and Ubuntu's stock 10-auth.conf ends by including this file,
+#: which declares `passdb { driver = pam }` and `userdb { driver =
+#: passwd }`. Dovecot tries passdbs in the order they are declared, and
+#: conf.d/10-* comes before 99-lightr.conf, so every IMAP login went to
+#: PAM first: a "pam_unix(dovecot:auth): check pass; user unknown" line
+#: per login, plus PAM's failure delay before Lightr was even asked.
+#: Dovecot 2.3 has no way to remove a passdb declared earlier, so the
+#: include itself has to go.
+AUTH_CONF = Path("conf.d") / "10-auth.conf"
+SYSTEM_AUTH_INCLUDE = re.compile(
+    r"^([ \t]*)(!include(?:_try)?[ \t]+auth-system\.conf\.ext[ \t]*)$", re.MULTILINE
+)
+
+
+def system_auth_included(text: str) -> bool:
+    """Whether a 10-auth.conf still pulls in the system (PAM) passdb."""
+    return SYSTEM_AUTH_INCLUDE.search(text) is not None
+
+
+def without_system_auth(text: str) -> str:
+    """10-auth.conf with the system auth include commented out.
+
+    Commented rather than deleted, with the reason beside it, so anyone
+    reading the stock file can see what changed and put it back.
+    """
+    return SYSTEM_AUTH_INCLUDE.sub(
+        r"\1# Disabled by Lightr, which authenticates every login itself.\n"
+        r"\1# PAM was being tried first on each one. See docs/DEPLOY.md.\n"
+        r"\1#\2",
+        text,
+    )
 
 
 def write_atomic(
@@ -236,6 +280,10 @@ class DovecotManager:
                 report.changes.append(master)
 
             report.changes.extend(self.remove_retired())
+
+            system_auth = self.disable_system_auth()
+            if system_auth is not None:
+                report.changes.append(system_auth)
         except BaseException:
             self.rollback(report)
             raise
@@ -314,8 +362,8 @@ class DovecotManager:
             )
         return None
 
-    def drift(self) -> list[str]:
-        """Names of generated files that no longer match this config.
+    def drift(self) -> Drift:
+        """Which generated files no longer match this config.
 
         Read-only on purpose. ``serve`` used to reconcile on every
         start, which meant the service needed write access to
@@ -325,25 +373,37 @@ class DovecotManager:
         is worth it. Configuration happens at install time; a running
         service reports drift and leaves it alone.
         """
-        stale: list[str] = []
+        drift = Drift()
         try:
             generated = dovecot_config.generate(self.cfg)
         except dovecot_config.DovecotConfigError:
             # Cannot even work out what the files should say -- usually
             # no internal key yet. Reporting that as "no drift" would
             # be the reassuring answer rather than the true one.
-            return ["(Dovecot has never been configured)"]
+            drift.stale.append("(Dovecot has never been configured)")
+            return drift
 
         for item in generated:
             target = self._retarget(item.path)
             try:
                 current = target.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                drift.stale.append(target.name)
+                continue
+            except PermissionError:
+                # `serve` runs as the lightr user, and the files carrying
+                # the internal key and the database DSN are root:dovecot
+                # on purpose. Not being able to read them says nothing
+                # about whether they are current; calling that drift
+                # warned on every start of a correctly installed server.
+                drift.unverifiable.append(target.name)
+                continue
             except OSError:
-                stale.append(target.name)
+                drift.stale.append(target.name)
                 continue
             if current != item.content:
-                stale.append(target.name)
-        return stale
+                drift.stale.append(target.name)
+        return drift
 
     #: Files earlier versions generated that nothing reads now. The
     #: Lua script is not merely unused -- it holds the internal auth
@@ -366,6 +426,27 @@ class DovecotManager:
             log.info("removed %s, which nothing reads any more", path)
             removed.append(Change(path, "removed"))
         return removed
+
+    def disable_system_auth(self) -> Change | None:
+        """Comment out the stock PAM include in conf.d/10-auth.conf.
+
+        See ``SYSTEM_AUTH_INCLUDE`` for why. Goes through
+        ``write_atomic``, so the stock file is backed up, the edit is
+        rolled back with everything else if ``doveconf`` rejects the
+        result, and a second install finds nothing to do.
+        """
+        path = self.conf_dir / AUTH_CONF
+        try:
+            current = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            # Not a Debian-family Dovecot, or none at all: nothing
+            # declares a PAM passdb ahead of ours.
+            return None
+        if not system_auth_included(current):
+            return None
+        # It is Dovecot's file, not ours: keep whatever mode it had.
+        mode = path.stat().st_mode & 0o777
+        return write_atomic(path, without_system_auth(current), mode=mode)
 
     def _retarget(self, path: Path) -> Path:
         """Point a generated path at this manager's conf directory."""
@@ -473,14 +554,15 @@ class DovecotManager:
             "internal_key_set": bool(self.cfg.dovecot.internal_key),
         }
 
-        if not self.doveadm.available:
-            info["version"] = None
-            return info
-
+        # Asked of dovecot/doveconf, not doveadm, so this is answered
+        # even where doveadm itself is missing.
         try:
-            info["version"] = (await self.doveadm.version()).splitlines()[0]
+            info["version"] = await self.doveadm.version()
         except DoveadmError as exc:
             info["version"] = f"unavailable: {exc}"
+
+        if not self.doveadm.available:
+            return info
 
         try:
             info["connected_users"] = len(await self.doveadm.who())
@@ -513,12 +595,16 @@ class DovecotManager:
 
 
 __all__ = [
+    "AUTH_CONF",
     "DEFAULT_MASTER_USER",
     "DOVECOT_CONF_DIR",
     "MASTER_USERS_FILE",
     "Change",
     "DovecotManagementError",
     "DovecotManager",
+    "Drift",
     "InstallReport",
+    "system_auth_included",
+    "without_system_auth",
     "write_atomic",
 ]

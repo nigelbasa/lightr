@@ -8,6 +8,7 @@ does not parse never reaches the running service.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,8 @@ from lightr.dovecot.manage import (
     DEFAULT_MASTER_USER,
     DovecotManagementError,
     DovecotManager,
+    system_auth_included,
+    without_system_auth,
     write_atomic,
 )
 
@@ -281,11 +284,153 @@ class TestStatus:
         self, cfg_with_key: Config, tmp_path: Path
     ) -> None:
         """Status is what an operator runs when things are wrong."""
-        manager = _manager(
-            cfg_with_key, tmp_path / "d", doveadm=FakeDoveadm(fail=True)
-        )
+        doveadm = FakeDoveadm(fail=True)
+        doveadm.version_commands = [(sys.executable, "-c", "import sys; sys.exit(1)")]
+        manager = _manager(cfg_with_key, tmp_path / "d", doveadm=doveadm)
         info = await manager.status()
         assert "unavailable" in str(info["version"])
+        assert info["connected_users"] is None
+
+    async def test_the_version_is_reported_without_doveadm(
+        self, cfg_with_key: Config, tmp_path: Path
+    ) -> None:
+        """It comes from dovecot itself, so a missing doveadm does not
+        hide which Dovecot is installed."""
+
+        class NoDoveadm(FakeDoveadm):
+            @property
+            def available(self) -> bool:
+                return False
+
+        doveadm = NoDoveadm()
+        doveadm.version_commands = [(sys.executable, "-c", "print('2.3.16 (7e2e900c1a)')")]
+        info = await _manager(cfg_with_key, tmp_path / "d", doveadm=doveadm).status()
+
+        assert info["version"] == "2.3.16 (7e2e900c1a)"
+        assert info["doveadm_available"] is False
+
+
+#: Ubuntu 22.04's /etc/dovecot/conf.d/10-auth.conf, the part that matters.
+STOCK_10_AUTH = """\
+##
+## Authentication processes
+##
+auth_mechanisms = plain
+
+##
+## Password and user databases
+##
+
+#!include auth-deny.conf.ext
+#!include auth-master.conf.ext
+
+!include auth-system.conf.ext
+#!include auth-sql.conf.ext
+#!include auth-ldap.conf.ext
+"""
+
+
+class TestSystemAuthInclude:
+    """Ubuntu's stock 10-auth.conf declares a PAM passdb ahead of
+    Lightr's, so every IMAP login was tried against PAM first."""
+
+    def _stock(self, conf_dir: Path) -> Path:
+        path = conf_dir / "conf.d" / "10-auth.conf"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(STOCK_10_AUTH, encoding="utf-8")
+        return path
+
+    async def test_install_comments_the_include_out(
+        self, cfg_with_key: Config, tmp_path: Path
+    ) -> None:
+        conf_dir = tmp_path / "dovecot"
+        path = self._stock(conf_dir)
+
+        await _manager(cfg_with_key, conf_dir).install(reload=False)
+
+        text = path.read_text(encoding="utf-8")
+        assert not system_auth_included(text)
+        assert "#!include auth-system.conf.ext" in text
+        # Nothing else in Dovecot's file is touched.
+        assert text.replace(
+            "# Disabled by Lightr, which authenticates every login itself.\n"
+            "# PAM was being tried first on each one. See docs/DEPLOY.md.\n"
+            "#!include auth-system.conf.ext",
+            "!include auth-system.conf.ext",
+        ) == STOCK_10_AUTH
+
+    async def test_the_stock_file_is_backed_up(
+        self, cfg_with_key: Config, tmp_path: Path
+    ) -> None:
+        conf_dir = tmp_path / "dovecot"
+        path = self._stock(conf_dir)
+
+        report = await _manager(cfg_with_key, conf_dir).install(reload=False)
+
+        (change,) = [c for c in report.changes if c.path == path]
+        assert change.action == "written"
+        assert change.backup is not None
+        assert change.backup.name.startswith("10-auth.conf.lightr-")
+        assert change.backup.name.endswith(".bak")
+        assert change.backup.read_text(encoding="utf-8") == STOCK_10_AUTH
+
+    async def test_a_second_install_leaves_it_alone(
+        self, cfg_with_key: Config, tmp_path: Path
+    ) -> None:
+        conf_dir = tmp_path / "dovecot"
+        path = self._stock(conf_dir)
+        manager = _manager(cfg_with_key, conf_dir)
+
+        await manager.install(reload=False)
+        once = path.read_text(encoding="utf-8")
+        second = await manager.install(reload=False)
+
+        assert not second.changed
+        assert path.read_text(encoding="utf-8") == once
+
+    async def test_a_config_dovecot_rejects_puts_the_stock_file_back(
+        self, cfg_with_key: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conf_dir = tmp_path / "dovecot"
+        path = self._stock(conf_dir)
+
+        async def rejects(self) -> str:
+            return "line 3: syntax error"
+
+        monkeypatch.setattr(DovecotManager, "verify", rejects)
+
+        with pytest.raises(DovecotManagementError):
+            await _manager(cfg_with_key, conf_dir).install(reload=False)
+
+        assert path.read_text(encoding="utf-8") == STOCK_10_AUTH
+
+    async def test_no_10_auth_conf_is_fine(
+        self, cfg_with_key: Config, tmp_path: Path
+    ) -> None:
+        conf_dir = tmp_path / "dovecot"
+        report = await _manager(cfg_with_key, conf_dir).install(reload=False)
+
+        assert not (conf_dir / "conf.d" / "10-auth.conf").exists()
+        assert all(c.path.name != "10-auth.conf" for c in report.changes)
+
+    @pytest.mark.parametrize(
+        ("text", "included"),
+        [
+            ("!include auth-system.conf.ext\n", True),
+            ("  !include auth-system.conf.ext  \n", True),
+            ("!include_try auth-system.conf.ext\n", True),
+            ("#!include auth-system.conf.ext\n", False),
+            ("  # !include auth-system.conf.ext\n", False),
+            ("!include auth-sql.conf.ext\n", False),
+        ],
+    )
+    def test_detection(self, text: str, included: bool) -> None:
+        assert system_auth_included(text) is included
+
+    def test_indentation_is_kept(self) -> None:
+        text = without_system_auth("  !include auth-system.conf.ext\n")
+        assert "  #!include auth-system.conf.ext\n" in text
+        assert not system_auth_included(text)
 
 
 class TestRetiredFiles:

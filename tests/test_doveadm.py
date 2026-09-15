@@ -234,6 +234,57 @@ class TestMailboxes:
         assert await client.mailbox_list("ops@acme.test") == ["INBOX", "Sent"]
 
 
+class TestVersion:
+    """`doveadm --version` does not exist on Dovecot 2.3: `lightr dovecot
+    status` reported "doveadm: invalid option -- '-'" on Ubuntu 22.04."""
+
+    def _client(self, *scripts: str) -> Doveadm:
+        client = Doveadm(binary="definitely-not-a-real-binary")
+        client.version_commands = [(sys.executable, "-c", s) for s in scripts]
+        return client
+
+    def test_doveadm_is_not_asked(self) -> None:
+        assert all(argv[0] != "doveadm" for argv in Doveadm().version_commands)
+        assert Doveadm().version_commands[0] == ("dovecot", "--version")
+
+    async def test_dovecot_version_output_is_returned(self) -> None:
+        client = self._client("print('2.3.16 (7e2e900c1a)')")
+        assert await client.version() == "2.3.16 (7e2e900c1a)"
+
+    async def test_it_works_without_doveadm_installed(self) -> None:
+        client = self._client("print('2.3.16 (7e2e900c1a)')")
+        assert not client.available
+        assert await client.version() == "2.3.16 (7e2e900c1a)"
+
+    async def test_falls_back_to_doveconfs_header(self) -> None:
+        """dovecot is in /usr/sbin, not always on the service user's PATH."""
+        client = Doveadm()
+        client.version_commands = [
+            ("definitely-not-a-real-dovecot", "--version"),
+            (
+                sys.executable, "-c",
+                "print('# 2.3.16 (7e2e900c1a): /etc/dovecot/dovecot.conf'); "
+                "print('protocols = imap lmtp')",
+            ),
+        ]
+        assert await client.version() == "2.3.16 (7e2e900c1a)"
+
+    async def test_a_failing_command_falls_through(self) -> None:
+        client = self._client(
+            "import sys; sys.stderr.write(\"invalid option -- '-'\"); sys.exit(89)",
+            "print('2.3.21 (47349e2482)')",
+        )
+        assert await client.version() == "2.3.21 (47349e2482)"
+
+    async def test_nothing_working_is_a_doveadm_error_saying_why(self) -> None:
+        client = self._client("import sys; sys.exit(1)", "print('not a version')")
+        client.version_commands.insert(0, ("definitely-not-a-real-dovecot",))
+        with pytest.raises(DoveadmError) as excinfo:
+            await client.version()
+        message = str(excinfo.value)
+        assert "definitely-not-a-real-dovecot not found" in message
+
+
 class TestConcurrency:
     async def test_calls_do_not_block_the_event_loop(self) -> None:
         """Every call is awaited, so a slow doveadm delays only its

@@ -336,6 +336,33 @@ def check_doveconf(report: Report) -> None:
     report.add("dovecot-config", Level.OK, "doveconf accepts the configuration")
 
 
+def check_system_auth(report: Report, conf_dir: Path = Path("/etc/dovecot")) -> None:
+    """Whether Dovecot tries PAM before Lightr on every login.
+
+    ``lightr dovecot install`` comments the include out; this catches an
+    install that could not, or a dovecot-core upgrade that put the stock
+    file back. A warning, not a failure: logins still work, just slower
+    and with a PAM failure logged for each.
+    """
+    from lightr.dovecot.manage import AUTH_CONF, system_auth_included
+
+    path = conf_dir / AUTH_CONF
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return  # no Debian-style conf.d: nothing declares a PAM passdb
+    if not system_auth_included(text):
+        return
+    report.add(
+        "dovecot-pam",
+        Level.WARN,
+        f"{path} includes auth-system.conf.ext, so every IMAP login is tried "
+        "against PAM before Lightr",
+        f"lightr dovecot install  (or comment out `!include auth-system.conf.ext` "
+        f"in {path}, then: systemctl reload dovecot)",
+    )
+
+
 def run(cfg: Config, config_path: Path | None = None) -> Report:
     """Every check, in the order a failure would matter."""
     report = Report()
@@ -346,6 +373,7 @@ def run(cfg: Config, config_path: Path | None = None) -> Report:
     check_dovecot(report)
     check_dovecot_modules(report, cfg)
     check_doveconf(report)
+    check_system_auth(report)
     return report
 
 

@@ -265,11 +265,19 @@ def serve() -> None:
     # is a worse trade than an operator running one command.
     from lightr.dovecot.manage import DovecotManager
 
-    stale = DovecotManager(cfg).drift()
-    if stale:
+    drift = DovecotManager(cfg).drift()
+    if drift.stale:
         output.warn(
-            f"Dovecot's configuration is out of date ({', '.join(stale)}). "
+            f"Dovecot's configuration is out of date ({', '.join(drift.stale)}). "
             "Run: lightr dovecot install"
+        )
+    if drift.unverifiable:
+        # Expected, not a problem: these carry credentials and are
+        # readable only by root and Dovecot. A warning here fired on
+        # every start of a correctly installed server.
+        logging.getLogger("lightr.dovecot").info(
+            "not checked for drift, as this user cannot read them: %s",
+            ", ".join(drift.unverifiable),
         )
 
     try:
