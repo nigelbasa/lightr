@@ -285,7 +285,13 @@ class DovecotManager:
         import asyncio
 
         if self.sievec_command is None:
-            return None
+            # The .deb depends on dovecot-sieve, which ships sievec; a
+            # pip install does not. Without it Sieve does not run at all,
+            # so spam reaches the inbox -- say so while someone is looking.
+            return (
+                "sievec was not found, so spam will not be filed into Junk: "
+                "install dovecot-sieve"
+            )
         path = self._retarget(dovecot_config.spam_script_path(self.cfg))
         try:
             process = await asyncio.create_subprocess_exec(

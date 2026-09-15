@@ -387,6 +387,10 @@ class TestSpamFiling:
         assert '"X-Lightr-Spam-Action"' in script.content
         assert 'fileinto :create "Junk";' in script.content
         assert "stop;" in script.content
+        # Its header describes what rewrites it, not filter-rule changes.
+        assert "lightr setup" in script.content
+        assert "filter rules change" not in script.content
+        assert script.content.count('require ["fileinto", "mailbox"];') == 1
 
     def test_dovecot_runs_it_before_each_mailbox_script(
         self, configured: Config
@@ -435,11 +439,17 @@ class TestSpamScriptCompilation:
         assert "unknown extension" in warning
         assert "inbox" in warning
 
-    async def test_no_sievec_means_nothing_to_do(
+    async def test_no_sievec_is_a_warning_naming_the_package(
         self, configured: Config, tmp_path: Path
     ) -> None:
+        """Without sievec there is no Sieve, and spam goes to the inbox.
+        Silence here would leave that for the Dovecot log to reveal."""
         from lightr.dovecot.manage import DovecotManager
 
         manager = DovecotManager(configured, conf_dir=tmp_path)
         manager.sievec_command = None
-        assert await manager.compile_spam_script() is None
+
+        warning = await manager.compile_spam_script()
+
+        assert warning is not None
+        assert "dovecot-sieve" in warning
