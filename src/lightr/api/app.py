@@ -851,14 +851,15 @@ def create_app(cfg: Config, engine: AsyncEngine | None = None) -> Starlette:
         except ValueError as exc:
             return error(400, str(exc))
 
-    app = Starlette(
-        routes=ROUTES,
-        middleware=[Middleware(BaseHTTPMiddleware, dispatch=middleware)],
-    )
-    app.state.engine = engine
-    app.state.config = cfg
+    from collections.abc import AsyncIterator
+    from contextlib import asynccontextmanager
 
-    async def _shutdown() -> None:
+    @asynccontextmanager
+    async def lifespan(app: Starlette) -> AsyncIterator[None]:
+        # A lifespan, not add_event_handler: Starlette 1.x removed the
+        # event handlers, and the old owned-engine branch here would
+        # have raised AttributeError for any caller not passing one.
+        yield
         # Sending through the API creates a submission handler, whose
         # webhook announcements run as background tasks. Let them
         # finish, or a restart drops mail.received events on the floor.
@@ -867,7 +868,13 @@ def create_app(cfg: Config, engine: AsyncEngine | None = None) -> Starlette:
         if owned_engine:
             await engine.dispose()
 
-    app.add_event_handler("shutdown", _shutdown)
+    app = Starlette(
+        routes=ROUTES,
+        middleware=[Middleware(BaseHTTPMiddleware, dispatch=middleware)],
+        lifespan=lifespan,
+    )
+    app.state.engine = engine
+    app.state.config = cfg
 
     return app
 

@@ -607,7 +607,7 @@ class TestShutdown:
         app = create_app(cfg, engine=engine)
         app.state.submission = Submission()
 
-        for handler in app.router.on_shutdown:
-            await handler()
+        async with app.router.lifespan_context(app):
+            pass
 
         assert drained == [True]
