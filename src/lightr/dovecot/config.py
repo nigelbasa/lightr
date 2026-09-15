@@ -122,9 +122,13 @@ passdb {
   driver = passwd-file
   args = /etc/dovecot/master-users
   master = yes
-  result_success = continue
 }
 """
+        # No `result_success = continue` (nor `pass = yes`): either makes
+        # Dovecot re-check the target user against the regular passdbs
+        # without a password, which checkpassword and PAM cannot answer,
+        # so every master login ends in authz_fail. Without it the master
+        # authenticates here and the user is found through the userdb.
         # Without this, Dovecot never splits "user*master" -- it looks
         # the whole string up as one username, fails, and the master
         # user is silently inert. Every mailbox read goes through it,

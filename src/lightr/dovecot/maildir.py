@@ -92,6 +92,31 @@ class MaildirLayout:
         subscriptions = self.root / "subscriptions"
         if not subscriptions.exists():
             subscriptions.write_text("\n".join(folders) + "\n", encoding="utf-8")
+        self._hand_to_mail_user()
+
+    def _hand_to_mail_user(self) -> None:
+        """Give the tree to the user Dovecot delivers and reads as.
+
+        `lightr account create` and `lightr dovecot provision` run as
+        root. Left root-owned, every IMAP append and LMTP delivery into
+        the mailbox fails with "Permission denied" -- which is what the
+        first production cutover found in all 13 mailboxes. The domain
+        directory is included so Dovecot can create later mailboxes in it.
+        """
+        import os
+
+        if not hasattr(os, "geteuid") or os.geteuid() != 0:
+            return
+        import pwd
+
+        from lightr.dovecot.config import MAIL_USER
+
+        try:
+            user = pwd.getpwnam(MAIL_USER)
+        except KeyError:
+            return
+        for path in (self.root.parent, self.root, *self.root.rglob("*")):
+            os.chown(path, user.pw_uid, user.pw_gid)
 
     def message_count(self, folder: str = "INBOX") -> int:
         """Messages in a folder, counted off disk.

@@ -395,6 +395,10 @@ def import_mail(
         output.warn(failure)
     if len(report.failures) > 10:
         output.warn(f"...and {len(report.failures) - 10} more failures")
+    if report.failures:
+        # A script driving several imports must be able to tell that
+        # "Imported 0 message(s)" was every append being refused.
+        raise typer.Exit(1)
 
 
 class _NoMailbox:

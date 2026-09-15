@@ -12,7 +12,9 @@ import asyncio
 import contextlib
 import logging
 import signal
+import ssl
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -69,16 +71,23 @@ class Server:
         """Bring every listener up."""
         self.engine = self.engine or create_engine(self.cfg)
 
-        self._start_smtp()
+        await self._start_smtp()
         self._start_sender()
         await self._start_http()
 
         log.info("lightr is up as %s", self.cfg.server.hostname)
 
-    def _start_smtp(self) -> None:
-        from aiosmtpd.controller import Controller
+    async def _start_smtp(self) -> None:
+        # Served on this process's own event loop, not through aiosmtpd's
+        # Controller. The Controller runs each listener on a private loop
+        # in a thread, and asyncpg connections belong to the loop that
+        # opened them: on Postgres every RCPT failed with "another
+        # operation is in progress" and senders got a permanent 500.
+        # SQLite hid it, because aiosqlite works from any loop.
+        from aiosmtpd.smtp import SMTP
 
         assert self.engine is not None
+        loop = asyncio.get_running_loop()
 
         receive_host, receive_port = parse_addr(self.cfg.smtp.addr, 25)
         submit_host, submit_port = parse_addr(self.cfg.smtp.submission_addr, 587)
@@ -87,38 +96,54 @@ class Server:
         submission_handler = LightrHandler(self.cfg, self.engine, require_auth=True)
         self._handlers = [receive_handler, submission_handler]
 
-        # :25 takes mail from the internet and must never relay.
-        receive = Controller(
-            receive_handler,
-            hostname=receive_host,
-            port=receive_port,
-            ident=f"lightr {self.cfg.server.hostname}",
-        )
-        # :587 is for authenticated users and may send anywhere.
-        submission = Controller(
-            submission_handler,
-            hostname=submit_host,
-            port=submit_port,
+        tls = tls_context(self.cfg)
+        ident = f"lightr {self.cfg.server.hostname}"
+
+        listeners = (
+            # :25 takes mail from the internet and must never relay.
+            ("smtp", receive_handler, receive_host, receive_port, {}),
+            # :587 is for authenticated users and may send anywhere.
             # No authenticator= here on purpose: aiosmtpd calls that
             # synchronously and would not await our check. The handler
             # implements auth_PLAIN / auth_LOGIN instead, which are
             # awaited. See the comment in mail/smtp.py.
-            auth_require_tls=self.cfg.security.require_tls_for_auth,
-            ident=f"lightr {self.cfg.server.hostname}",
+            (
+                "submission",
+                submission_handler,
+                submit_host,
+                submit_port,
+                {"auth_require_tls": self.cfg.security.require_tls_for_auth},
+            ),
         )
+        for label, handler, host, port, extra in listeners:
 
-        for controller, label, port in (
-            (receive, "smtp", receive_port),
-            (submission, "submission", submit_port),
-        ):
+            def protocol(handler: LightrHandler = handler, extra: dict = extra) -> SMTP:
+                return SMTP(
+                    handler,
+                    hostname=self.cfg.server.hostname,
+                    ident=ident,
+                    tls_context=tls,
+                    loop=loop,
+                    **extra,
+                )
+
             try:
-                controller.start()
+                listener = await loop.create_server(protocol, host=host, port=port)
             except OSError as exc:
                 raise ServerError(_bind_failure(label, port, exc)) from exc
-            self._controllers.append(controller)
+            self._controllers.append(listener)
 
-        log.info("smtp on %s:%s, submission on %s:%s",
-                 receive_host, receive_port, submit_host, submit_port)
+        log.info("smtp on %s:%s, submission on %s:%s (STARTTLS %s)",
+                 receive_host, receive_port, submit_host, submit_port,
+                 "on" if tls is not None else "OFF")
+
+    @property
+    def smtp_ports(self) -> list[int]:
+        """The ports the SMTP listeners bound, in start order."""
+        return [
+            listener.sockets[0].getsockname()[1]  # type: ignore[attr-defined]
+            for listener in self._controllers
+        ]
 
     def _start_sender(self) -> None:
         assert self.engine is not None
@@ -167,9 +192,15 @@ class Server:
         """
         log.info("shutting down")
 
-        for controller in self._controllers:
+        for listener in self._controllers:
+            listener.close()  # type: ignore[attr-defined]
+        for listener in self._controllers:
+            # wait_closed() also waits for open sessions on 3.12+; a
+            # client idling mid-transaction must not hold up shutdown.
             with contextlib.suppress(Exception):
-                controller.stop()  # type: ignore[attr-defined]
+                await asyncio.wait_for(
+                    listener.wait_closed(), timeout=5.0  # type: ignore[attr-defined]
+                )
         self._controllers.clear()
 
         if self._sender is not None:
@@ -206,6 +237,62 @@ class Server:
         log.info("stopped")
 
 
+def tls_context(cfg: Config) -> ssl.SSLContext | None:
+    """The STARTTLS context for both SMTP listeners.
+
+    Serves ``tls.cert_file`` by default, and a ``tls.domain_certs`` entry
+    when the client's SNI names that host. Missing files leave STARTTLS
+    off with a warning -- a development box has no certificate -- but a
+    certificate that exists and will not load stops the engine: a
+    production server quietly offering no TLS is worse than one that
+    refuses to start.
+    """
+    if not _present(cfg.tls.cert_file, cfg.tls.key_file):
+        log.warning(
+            "no TLS certificate at %s; SMTP will not offer STARTTLS", cfg.tls.cert_file
+        )
+        return None
+    assert cfg.tls.cert_file is not None and cfg.tls.key_file is not None
+    default = _load_context(cfg.tls.cert_file, cfg.tls.key_file)
+
+    by_name: dict[str, ssl.SSLContext] = {}
+    for name, cert in cfg.tls.domain_certs.items():
+        if not _present(cert.cert_file, cert.key_file):
+            log.warning(
+                "no certificate for %s at %s; it will be offered the default",
+                name, cert.cert_file,
+            )
+            continue
+        by_name[name.lower().rstrip(".")] = _load_context(cert.cert_file, cert.key_file)
+
+    if by_name:
+
+        def choose(
+            conn: ssl.SSLSocket | ssl.SSLObject, server_name: str | None, _: ssl.SSLContext
+        ) -> None:
+            if server_name:
+                chosen = by_name.get(server_name.lower().rstrip("."))
+                if chosen is not None:
+                    conn.context = chosen
+
+        default.sni_callback = choose
+    return default
+
+
+def _present(cert: Path | None, key: Path | None) -> bool:
+    return cert is not None and key is not None and cert.is_file() and key.is_file()
+
+
+def _load_context(cert: Path, key: Path) -> ssl.SSLContext:
+    context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    try:
+        context.load_cert_chain(cert, key)
+    except (OSError, ssl.SSLError) as exc:
+        raise ServerError(f"cannot load the TLS certificate {cert}: {exc}") from exc
+    return context
+
+
 def _bind_failure(label: str, port: int, exc: OSError) -> str:
     """Explain a bind failure without guessing at the cause.
 
@@ -228,4 +315,11 @@ class ServerError(RuntimeError):
     """The engine could not start."""
 
 
-__all__ = ["ANY_HOST", "SHUTDOWN_GRACE_SECONDS", "Server", "ServerError", "parse_addr"]
+__all__ = [
+    "ANY_HOST",
+    "SHUTDOWN_GRACE_SECONDS",
+    "Server",
+    "ServerError",
+    "parse_addr",
+    "tls_context",
+]

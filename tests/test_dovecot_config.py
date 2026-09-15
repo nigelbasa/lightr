@@ -109,6 +109,17 @@ class TestAuthWiring:
         configured.dovecot.master_user = "lightr-master"
         assert "master = yes" in dovecot_conf(configured)
 
+    def test_master_passdb_does_not_recheck_the_user(self, configured: Config) -> None:
+        """`result_success = continue` or `pass = yes` sends the target
+        user back through checkpassword/PAM without a password; on a live
+        Dovecot every master login then failed with authz_fail."""
+        configured.dovecot.master_user = "lightr-master"
+        conf = dovecot_conf(configured)
+        block = conf[conf.index("args = /etc/dovecot/master-users") :]
+        block = block[: block.index("}")]
+        assert "result_success" not in block
+        assert "pass = yes" not in block
+
 
 class TestSieveWiring:
     def test_extensions_the_generator_emits_are_enabled(
