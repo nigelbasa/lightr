@@ -24,6 +24,7 @@ from starlette.routing import Route
 
 from lightr import __version__
 from lightr.api.auth import AuthError, Principal, authenticate, client_ip
+from lightr.api.filters import FILTER_ROUTES
 from lightr.api.internal import INTERNAL_PATHS, INTERNAL_ROUTES
 from lightr.api.mailbox import MAILBOX_ROUTES
 from lightr.apikeys import APIKeyError, APIKeyRepo, KeyType, Permission
@@ -667,6 +668,7 @@ ROUTES: list[Route] = [
 ]
 
 ROUTES.extend(MAILBOX_ROUTES)
+ROUTES.extend(FILTER_ROUTES)
 ROUTES.extend(INTERNAL_ROUTES)
 
 #: Paths the API-key middleware does not guard. /health is public;
