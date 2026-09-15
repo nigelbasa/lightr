@@ -51,6 +51,8 @@ class FakeIMAP:
         }
         self.moved: list[tuple[str, int, str]] = []
         self.expunged: list[tuple[str, int]] = []
+        self.user_folders: list[str] = []
+        self.appended: list[tuple[str, bytes, tuple[str, ...]]] = []
 
     async def login(self, username: str, password: str) -> None: ...
     async def logout(self) -> None: ...
@@ -60,7 +62,31 @@ class FakeIMAP:
             Folder("Sent", 0, 0, 1),
             Folder("INBOX", len(self.messages["INBOX"]), 2, 1),
             Folder("Archive", 0, 0, 1),
+            *(Folder(name, 0, 0, 1) for name in self.user_folders),
         ]
+
+    async def create_folder(self, name: str) -> None:
+        if name in self.user_folders:
+            raise MailboxError(f"could not create folder {name!r}: already exists")
+        self.user_folders.append(name)
+        self.messages.setdefault(name, {})
+
+    async def rename_folder(self, name: str, new_name: str) -> None:
+        if name not in self.user_folders:
+            raise MailboxError(f"could not rename {name!r}: no such folder")
+        self.user_folders[self.user_folders.index(name)] = new_name
+        self.messages[new_name] = self.messages.pop(name, {})
+
+    async def delete_folder(self, name: str) -> None:
+        if name not in self.user_folders:
+            raise MailboxError(f"could not delete folder {name!r}: no such folder")
+        self.user_folders.remove(name)
+        self.messages.pop(name, None)
+
+    async def append(self, folder, raw, *, flags=(), date=None) -> None:
+        self.appended.append((folder, raw, tuple(flags)))
+        box = self.messages.setdefault(folder, {})
+        box[max(box, default=0) + 1] = (raw, set(flags))
 
     async def select(self, folder: str) -> Folder:
         return Folder(folder, len(self.messages.get(folder, {})), 0, 1)
@@ -94,23 +120,28 @@ class FakeIMAP:
         entry = self.messages.get(folder, {}).get(uid)
         return entry[0] if entry else b""
 
-    async def store_flags(
-        self, folder: str, uid: int, flags: list[str], *, add: bool
-    ) -> None:
-        current = self.messages[folder][uid][1]
-        if add:
-            current.update(flags)
-        else:
-            current.difference_update(flags)
+    async def store_flags(self, folder, uid, flags, *, add) -> None:
+        for one in _uids(uid):
+            current = self.messages[folder][one][1]
+            if add:
+                current.update(flags)
+            else:
+                current.difference_update(flags)
 
-    async def move(self, folder: str, uid: int, destination: str) -> None:
-        self.moved.append((folder, uid, destination))
-        entry = self.messages[folder].pop(uid)
-        self.messages.setdefault(destination, {})[uid] = entry
+    async def move(self, folder, uid, destination) -> None:
+        for one in _uids(uid):
+            self.moved.append((folder, one, destination))
+            entry = self.messages[folder].pop(one)
+            self.messages.setdefault(destination, {})[one] = entry
 
-    async def expunge(self, folder: str, uid: int) -> None:
-        self.expunged.append((folder, uid))
-        self.messages[folder].pop(uid, None)
+    async def expunge(self, folder, uid) -> None:
+        for one in _uids(uid):
+            self.expunged.append((folder, one))
+            self.messages[folder].pop(one, None)
+
+
+def _uids(uid: int | list[int]) -> list[int]:
+    return [uid] if isinstance(uid, int) else list(uid)
 
 
 @pytest.fixture
@@ -248,6 +279,82 @@ class TestFlagsAndMoves:
 
         assert imap.expunged == [("INBOX", 1)]
         assert 1 not in imap.messages["INBOX"]
+
+    async def test_deleting_from_trash_is_permanent(
+        self, mailbox: Mailbox, imap: FakeIMAP
+    ) -> None:
+        """Moving Trash to Trash would leave the message undeletable."""
+        await mailbox.delete("INBOX", 1)
+        await mailbox.delete("Trash", 1)
+
+        assert imap.expunged == [("Trash", 1)]
+        assert imap.messages["Trash"] == {}
+
+    async def test_answered_and_draft_flags(
+        self, mailbox: Mailbox, imap: FakeIMAP
+    ) -> None:
+        await mailbox.mark("INBOX", 2, answered=True, draft=True)
+        assert {"\\Answered", "\\Draft"} <= imap.messages["INBOX"][2][1]
+
+        await mailbox.mark("INBOX", 2, answered=False)
+        assert "\\Answered" not in imap.messages["INBOX"][2][1]
+        assert "\\Draft" in imap.messages["INBOX"][2][1]
+
+
+class TestBulk:
+    async def test_several_messages_at_once(
+        self, mailbox: Mailbox, imap: FakeIMAP
+    ) -> None:
+        await mailbox.mark("INBOX", [2, 3], seen=True, flagged=True)
+        for uid in (2, 3):
+            assert {FLAG_SEEN, FLAG_FLAGGED} <= imap.messages["INBOX"][uid][1]
+
+    async def test_bulk_move(self, mailbox: Mailbox, imap: FakeIMAP) -> None:
+        await mailbox.move("INBOX", [1, 2], "Archive")
+        assert set(imap.messages["Archive"]) == {1, 2}
+
+    async def test_emptying_a_folder(self, mailbox: Mailbox, imap: FakeIMAP) -> None:
+        await mailbox.delete("INBOX", [1, 2])
+
+        assert await mailbox.empty("Trash") == 2
+        assert imap.messages["Trash"] == {}
+
+    async def test_emptying_an_empty_folder(self, mailbox: Mailbox) -> None:
+        assert await mailbox.empty("Trash") == 0
+
+
+class TestFolderManagement:
+    async def test_create_rename_delete(
+        self, mailbox: Mailbox, imap: FakeIMAP
+    ) -> None:
+        await mailbox.create_folder("Receipts")
+        await mailbox.rename_folder("Receipts", "Receipts/2026")
+        assert "Receipts/2026" in [f.name for f in await mailbox.folders()]
+
+        await mailbox.delete_folder("Receipts/2026")
+        assert "Receipts/2026" not in [f.name for f in await mailbox.folders()]
+
+    @pytest.mark.parametrize("name", ["INBOX", "inbox", "Sent", "Trash", "Junk"])
+    async def test_system_folders_cannot_be_deleted(
+        self, mailbox: Mailbox, name: str
+    ) -> None:
+        """Junk is where the spam rules file mail; deleting it would
+        make every spam delivery fail."""
+        with pytest.raises(MailboxError, match="system folder"):
+            await mailbox.delete_folder(name)
+
+    async def test_system_folders_cannot_be_renamed(self, mailbox: Mailbox) -> None:
+        with pytest.raises(MailboxError, match="system folder"):
+            await mailbox.rename_folder("Sent", "Outbox")
+
+    @pytest.mark.parametrize(
+        "name", ["", " padded", "star*", "per%cent", "/lead", "trail/", "a//b", "bad\x07"]
+    )
+    async def test_names_imap_would_misread_are_refused(
+        self, mailbox: Mailbox, name: str
+    ) -> None:
+        with pytest.raises(MailboxError):
+            await mailbox.create_folder(name)
 
 
 class TestSearchCriteria:

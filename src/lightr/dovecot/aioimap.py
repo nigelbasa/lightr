@@ -154,6 +154,35 @@ class AioIMAPClient:
             uidvalidity=values.get("UIDVALIDITY", 0),
         )
 
+    async def create_folder(self, name: str) -> None:
+        client = await self._connect()
+        response = await client.create(_quote(name))
+        if response.result != "OK":
+            raise MailboxError(f"could not create folder {name!r}: {_detail(response)}")
+        # Subscribed, or most clients will not show it.
+        await client.subscribe(_quote(name))
+
+    async def rename_folder(self, name: str, new_name: str) -> None:
+        client = await self._connect()
+        response = await client.rename(_quote(name), _quote(new_name))
+        if response.result != "OK":
+            raise MailboxError(
+                f"could not rename {name!r} to {new_name!r}: {_detail(response)}"
+            )
+        await client.subscribe(_quote(new_name))
+        if self._selected == name:
+            self._selected = None
+
+    async def delete_folder(self, name: str) -> None:
+        client = await self._connect()
+        if self._selected == name:
+            # Dovecot refuses to delete the selected mailbox.
+            await client.close()
+            self._selected = None
+        response = await client.delete(_quote(name))
+        if response.result != "OK":
+            raise MailboxError(f"could not delete folder {name!r}: {_detail(response)}")
+
     async def select(self, folder: str) -> Folder:
         client = await self._connect()
         response = await client.select(_quote(folder))
@@ -213,26 +242,26 @@ class AioIMAPClient:
         return bytes(max(chunks, key=len))
 
     async def store_flags(
-        self, folder: str, uid: int, flags: list[str], *, add: bool
+        self, folder: str, uid: int | list[int], flags: list[str], *, add: bool
     ) -> None:
         client = await self._ensure_selected(folder)
         operation = "+FLAGS" if add else "-FLAGS"
         response = await client.uid(
-            "store", str(uid), operation, f"({' '.join(flags)})"
+            "store", _uid_set(uid), operation, f"({' '.join(flags)})"
         )
         if response.result != "OK":
             raise MailboxError(f"could not update flags on message {uid}")
 
-    async def move(self, folder: str, uid: int, destination: str) -> None:
+    async def move(self, folder: str, uid: int | list[int], destination: str) -> None:
         client = await self._ensure_selected(folder)
 
-        response = await client.uid("move", str(uid), _quote(destination))
+        response = await client.uid("move", _uid_set(uid), _quote(destination))
         if response.result == "OK":
             return
 
         # MOVE (RFC 6851) is not universal. Fall back to the older
         # COPY + \Deleted + EXPUNGE, which every server supports.
-        copied = await client.uid("copy", str(uid), _quote(destination))
+        copied = await client.uid("copy", _uid_set(uid), _quote(destination))
         if copied.result != "OK":
             raise MailboxError(
                 f"could not move message {uid} to {destination!r} -- "
@@ -275,18 +304,32 @@ class AioIMAPClient:
                 f"{' '.join(_as_lines(response.lines))[:200]}"
             )
 
-    async def expunge(self, folder: str, uid: int) -> None:
+    async def expunge(self, folder: str, uid: int | list[int]) -> None:
         client = await self._ensure_selected(folder)
 
-        # UID EXPUNGE (RFC 4315) removes only this message. Plain
+        # UID EXPUNGE (RFC 4315) removes only these messages. Plain
         # EXPUNGE would remove every \Deleted message in the folder,
         # which is not what deleting one message means.
-        response = await client.uid("expunge", str(uid))
+        response = await client.uid("expunge", _uid_set(uid))
         if response.result != "OK":
             raise MailboxError(
                 f"could not expunge message {uid}; the server may not "
                 "support UIDPLUS"
             )
+
+
+def _uid_set(uid: int | list[int]) -> str:
+    """One UID, or several as a comma-separated set -- one round trip
+    for a bulk action rather than one per message."""
+    if isinstance(uid, int):
+        return str(uid)
+    if not uid:
+        raise MailboxError("no messages given")
+    return ",".join(str(int(u)) for u in uid)
+
+
+def _detail(response: Any) -> str:
+    return " ".join(_as_lines(response.lines))[:200]
 
 
 def _quote(name: str) -> str:

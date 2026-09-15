@@ -12,9 +12,9 @@ disagree about what is in a mailbox.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, TypeVar
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -23,12 +23,17 @@ from starlette.routing import Route
 from lightr.api.auth import AuthError, Principal
 from lightr.apikeys import Permission
 from lightr.dovecot.mailbox import (
+    FLAG_DRAFT,
+    FLAG_SEEN,
     Mailbox,
+    MailboxError,
     MessageNotFoundError,
     build_search_criteria,
 )
 from lightr.models import Account
 from lightr.repo import AccountRepo
+
+T = TypeVar("T")
 
 
 async def _account_for(request: Request) -> Account:
@@ -181,6 +186,35 @@ async def get_message(request: Request) -> Response:
     )
 
 
+#: Flags a client may set, and the body keys that name them. `read` is
+#: what people say; `seen` is what IMAP says. Both work.
+_FLAG_KEYS = {
+    "seen": ("read", "seen"),
+    "flagged": ("flagged",),
+    "answered": ("answered",),
+    "draft": ("draft",),
+}
+
+#: The most messages one bulk request may touch. A UID set this long is
+#: still one IMAP command, but an unbounded one is a way to make
+#: Dovecot do arbitrary work on a single request.
+MAX_BULK = 1000
+
+#: Folders "empty" works on. Emptying anything else is one request away
+#: from destroying an inbox; a client that means it can purge by UID.
+EMPTYABLE = ("Trash", "Junk")
+
+
+def _flags(body: dict[str, Any]) -> dict[str, bool | None]:
+    flags: dict[str, bool | None] = {}
+    for name, keys in _FLAG_KEYS.items():
+        value = next((body[k] for k in keys if k in body), None)
+        if value is not None and not isinstance(value, bool):
+            raise AuthError(400, f"{keys[0]} must be true or false")
+        flags[name] = value
+    return flags
+
+
 async def mark_message(request: Request) -> Response:
     from lightr.api.app import parse_body
 
@@ -188,25 +222,66 @@ async def mark_message(request: Request) -> Response:
     uid = _uid(request)
     body = await parse_body(request)
 
-    seen = body.get("read", body.get("seen"))
-    flagged = body.get("flagged")
+    flags = _flags(body)
     move_to = body.get("folder")
 
-    if seen is None and flagged is None and move_to is None:
-        raise AuthError(400, "give at least one of: read, flagged, folder")
+    if all(v is None for v in flags.values()) and move_to is None:
+        raise AuthError(
+            400, "give at least one of: read, flagged, answered, draft, folder"
+        )
 
     async with _open(request) as (mailbox, _):
-        if seen is not None or flagged is not None:
-            await mailbox.mark(
-                folder,
-                uid,
-                seen=bool(seen) if seen is not None else None,
-                flagged=bool(flagged) if flagged is not None else None,
-            )
+        await _mailbox_call(mailbox.mark(folder, uid, **flags))
         if move_to:
-            await mailbox.move(folder, uid, str(move_to))
+            await _mailbox_call(mailbox.move(folder, uid, str(move_to)))
 
     return _json({"uid": uid, "folder": move_to or folder, "updated": True})
+
+
+async def bulk_messages(request: Request) -> Response:
+    """Flag, move or delete many messages in one request.
+
+    What a client's multi-select needs. Flags are applied before a move
+    or delete, so "mark read and archive" is one call.
+    """
+    from lightr.api.app import parse_body
+
+    body = await parse_body(request)
+    folder = str(body.get("folder") or "INBOX")
+    uids = body.get("uids")
+    if (
+        not isinstance(uids, list)
+        or not uids
+        or not all(isinstance(u, int) and not isinstance(u, bool) and u > 0
+                   for u in uids)
+    ):
+        raise AuthError(400, "uids must be a non-empty list of message UIDs")
+    if len(uids) > MAX_BULK:
+        raise AuthError(400, f"at most {MAX_BULK} messages per request")
+
+    flags = _flags(body)
+    move_to = body.get("move_to")
+    delete = body.get("delete")
+    purge = body.get("purge")
+    for name, value in (("delete", delete), ("purge", purge)):
+        if value is not None and not isinstance(value, bool):
+            raise AuthError(400, f"{name} must be true or false")
+    if move_to and (delete or purge):
+        raise AuthError(400, "move_to and delete cannot be combined")
+    if all(v is None for v in flags.values()) and not (move_to or delete or purge):
+        raise AuthError(
+            400,
+            "give at least one of: read, flagged, answered, draft, move_to, delete",
+        )
+
+    async with _open(request) as (mailbox, _):
+        await _mailbox_call(mailbox.mark(folder, uids, **flags))
+        if move_to:
+            await _mailbox_call(mailbox.move(folder, uids, str(move_to)))
+        elif delete or purge:
+            await _mailbox_call(mailbox.delete(folder, uids, expunge=bool(purge)))
+
+    return _json({"folder": move_to or folder, "uids": uids, "updated": len(uids)})
 
 
 async def delete_message(request: Request) -> Response:
@@ -217,6 +292,184 @@ async def delete_message(request: Request) -> Response:
     async with _open(request) as (mailbox, _):
         await mailbox.delete(folder, uid, expunge=purge)
     return Response(status_code=204)
+
+
+async def create_folder(request: Request) -> Response:
+    from lightr.api.app import parse_body
+
+    body = await parse_body(request)
+    name = body.get("name")
+    if not isinstance(name, str):
+        raise AuthError(400, "name is required")
+
+    async with _open(request) as (mailbox, _):
+        await _mailbox_call(mailbox.create_folder(name))
+    return _json({"name": name}, 201)
+
+
+async def rename_folder(request: Request) -> Response:
+    from lightr.api.app import parse_body
+
+    name = request.path_params["name"]
+    body = await parse_body(request)
+    new_name = body.get("name")
+    if not isinstance(new_name, str):
+        raise AuthError(400, "name (the new name) is required")
+
+    async with _open(request) as (mailbox, _):
+        await _mailbox_call(mailbox.rename_folder(name, new_name))
+    return _json({"name": new_name, "was": name})
+
+
+async def delete_folder(request: Request) -> Response:
+    name = request.path_params["name"]
+    async with _open(request) as (mailbox, _):
+        await _mailbox_call(mailbox.delete_folder(name))
+    return Response(status_code=204)
+
+
+async def empty_folder(request: Request) -> Response:
+    """Empty Trash or Junk -- the button every client has."""
+    name = request.path_params["name"]
+    if name not in EMPTYABLE:
+        raise AuthError(
+            400,
+            f"only {' and '.join(EMPTYABLE)} can be emptied; to remove mail "
+            "elsewhere for good, use POST /v1/mailbox/messages/bulk with purge",
+        )
+    async with _open(request) as (mailbox, _):
+        removed = await _mailbox_call(mailbox.empty(name))
+    return _json({"folder": name, "removed": removed})
+
+
+async def save_draft(request: Request) -> Response:
+    """Save a draft into Drafts, optionally replacing an older copy.
+
+    IMAP has no "update a message"; a client saves a new copy and
+    removes the old one, and `replace` does both in one request. The
+    new copy is stored before the old one is removed, so a failure in
+    between leaves two drafts rather than none.
+    """
+    from lightr.api.app import parse_body
+
+    body = await parse_body(request)
+    replace = body.get("replace")
+    if replace is not None and (not isinstance(replace, int) or isinstance(replace, bool)):
+        raise AuthError(400, "replace must be the UID of the draft to replace")
+
+    async with _open(request) as (mailbox, account):
+        raw = compose(account, body, require_recipients=False)
+        await _mailbox_call(
+            mailbox.append(DRAFTS, raw, flags=(FLAG_DRAFT, FLAG_SEEN))
+        )
+        if replace is not None:
+            await _mailbox_call(mailbox.delete(DRAFTS, replace, expunge=True))
+
+    return _json({"folder": DRAFTS, "saved": True, "replaced": replace}, 201)
+
+
+DRAFTS = "Drafts"
+
+#: The largest message the API will compose or accept whole.
+MAX_MESSAGE_BYTES = 25 * 1024 * 1024
+
+
+def compose(account: Account, body: dict[str, Any], *, require_recipients: bool) -> bytes:
+    """Build a message from JSON, or take one whole.
+
+    `raw` is for clients that build their own MIME (attachments,
+    inline images). Otherwise the message is assembled from to, cc,
+    bcc, subject, text, html, in_reply_to and references.
+
+    From is always this mailbox. A client that wants to send as an
+    alias passes `from`, and sending checks that the mailbox may use
+    it; a draft is only stored, so it is not checked there.
+    """
+    from email.message import EmailMessage
+    from email.utils import formataddr, formatdate, make_msgid
+
+    if raw := body.get("raw"):
+        if not isinstance(raw, str):
+            raise AuthError(400, "raw must be the message as a string")
+        data = raw.encode("utf-8", errors="surrogateescape")
+        if len(data) > MAX_MESSAGE_BYTES:
+            raise AuthError(413, "message is too large")
+        return data
+
+    message = EmailMessage()
+    sender = body.get("from") or account.email or ""
+    if not isinstance(sender, str):
+        raise AuthError(400, "from must be an address")
+    message["From"] = (
+        formataddr((account.display_name, sender))
+        if account.display_name and sender == account.email
+        else sender
+    )
+
+    any_recipient = False
+    for header in ("to", "cc", "bcc"):
+        addresses = _addresses(body.get(header), header)
+        if addresses:
+            any_recipient = True
+            message[header.capitalize()] = ", ".join(addresses)
+    if require_recipients and not any_recipient:
+        raise AuthError(400, "give at least one recipient in to, cc or bcc")
+
+    subject = body.get("subject") or ""
+    if not isinstance(subject, str):
+        raise AuthError(400, "subject must be text")
+    message["Subject"] = subject
+    message["Date"] = formatdate(localtime=False)
+    domain = (account.email or "localhost").rsplit("@", 1)[-1]
+    message["Message-ID"] = make_msgid(domain=domain)
+    for key, header in (("in_reply_to", "In-Reply-To"), ("references", "References")):
+        if value := body.get(key):
+            if not isinstance(value, str):
+                raise AuthError(400, f"{key} must be text")
+            message[header] = value
+
+    text = body.get("text")
+    html = body.get("html")
+    if text is not None and not isinstance(text, str):
+        raise AuthError(400, "text must be text")
+    if html is not None and not isinstance(html, str):
+        raise AuthError(400, "html must be text")
+    message.set_content(text or "")
+    if html:
+        message.add_alternative(html, subtype="html")
+
+    data = message.as_bytes()
+    if len(data) > MAX_MESSAGE_BYTES:
+        raise AuthError(413, "message is too large")
+    return data
+
+
+def _addresses(value: Any, name: str) -> list[str]:
+    if value is None:
+        return []
+    items = [value] if isinstance(value, str) else value
+    if not isinstance(items, list) or not all(isinstance(a, str) for a in items):
+        raise AuthError(400, f"{name} must be an address or a list of addresses")
+    cleaned = [a.strip() for a in items if a.strip()]
+    for address in cleaned:
+        if "@" not in address or any(c in address for c in "\r\n,;"):
+            raise AuthError(400, f"{address!r} in {name} is not a single address")
+    return cleaned
+
+
+async def _mailbox_call(operation: Awaitable[T]) -> T:
+    """Run a mailbox operation, reporting Dovecot's refusal as a 400.
+
+    Dovecot refusing a request (no such folder, a name it will not
+    take) is the caller's to fix. Not reaching Dovecot at all is raised
+    earlier, when the connection opens, and stays a server error.
+    """
+    try:
+        return await operation
+    except MessageNotFoundError as exc:
+        raise AuthError(404, str(exc)) from exc
+    except MailboxError as exc:
+        raise AuthError(400, str(exc)) from exc
 
 
 async def get_attachment(request: Request) -> Response:
@@ -264,7 +517,15 @@ def _int(raw: str | None, default: int, *, maximum: int | None = None) -> int:
 MAILBOX_ROUTES: list[Route] = [
     Route("/v1/mailbox", get_mailbox, methods=["GET"]),
     Route("/v1/mailbox/folders", list_folders, methods=["GET"]),
+    Route("/v1/mailbox/folders", create_folder, methods=["POST"]),
+    # Before the catch-all folder routes: `{name:path}` would otherwise
+    # swallow the trailing /empty as part of the folder name.
+    Route("/v1/mailbox/folders/{name:path}/empty", empty_folder, methods=["POST"]),
+    Route("/v1/mailbox/folders/{name:path}", rename_folder, methods=["PATCH"]),
+    Route("/v1/mailbox/folders/{name:path}", delete_folder, methods=["DELETE"]),
+    Route("/v1/mailbox/drafts", save_draft, methods=["POST"]),
     Route("/v1/mailbox/messages", list_messages, methods=["GET"]),
+    Route("/v1/mailbox/messages/bulk", bulk_messages, methods=["POST"]),
     Route("/v1/mailbox/messages/{id}", get_message, methods=["GET"]),
     Route("/v1/mailbox/messages/{id}", mark_message, methods=["PATCH"]),
     Route("/v1/mailbox/messages/{id}", delete_message, methods=["DELETE"]),

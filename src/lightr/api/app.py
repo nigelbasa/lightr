@@ -29,6 +29,7 @@ from lightr.api.mailbox import MAILBOX_ROUTES
 from lightr.apikeys import APIKeyError, APIKeyRepo, KeyType, Permission
 from lightr.config import Config
 from lightr.db.engine import create_engine, ping
+from lightr.dovecot.mailbox import MailboxError
 from lightr.models import Account, Alias, AuthMode, Domain, Organization
 from lightr.ratelimit import KeyLimiter, limiter
 from lightr.repo import (
@@ -733,6 +734,10 @@ def create_app(cfg: Config, engine: AsyncEngine | None = None) -> Starlette:
             return error(409, str(exc))
         except IntegrityError:
             return error(409, "that conflicts with an existing record")
+        except MailboxError as exc:
+            # Handlers turn Dovecot's refusals into 4xx themselves; what
+            # reaches here is not reaching Dovecot at all.
+            return error(502, f"the mail store is unavailable: {exc}")
         except ValueError as exc:
             return error(400, str(exc))
 

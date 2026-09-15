@@ -125,10 +125,13 @@ class IMAPProtocol(Protocol):
         date: datetime | None = None,
     ) -> None: ...
     async def store_flags(
-        self, folder: str, uid: int, flags: list[str], *, add: bool
+        self, folder: str, uid: int | list[int], flags: list[str], *, add: bool
     ) -> None: ...
-    async def move(self, folder: str, uid: int, destination: str) -> None: ...
-    async def expunge(self, folder: str, uid: int) -> None: ...
+    async def move(self, folder: str, uid: int | list[int], destination: str) -> None: ...
+    async def expunge(self, folder: str, uid: int | list[int]) -> None: ...
+    async def create_folder(self, name: str) -> None: ...
+    async def rename_folder(self, name: str, new_name: str) -> None: ...
+    async def delete_folder(self, name: str) -> None: ...
 
 
 def decode_mime_header(value: str | None) -> str:
@@ -353,30 +356,108 @@ class Mailbox:
             raise MessageNotFoundError(uid, folder)
         return extract_attachment(raw, index)
 
-    async def mark(self, folder: str, uid: int, *, seen: bool | None = None,
-                   flagged: bool | None = None) -> None:
-        if seen is not None:
-            await self._client.store_flags(folder, uid, [FLAG_SEEN], add=seen)
-        if flagged is not None:
-            await self._client.store_flags(folder, uid, [FLAG_FLAGGED], add=flagged)
+    async def mark(
+        self,
+        folder: str,
+        uid: int | list[int],
+        *,
+        seen: bool | None = None,
+        flagged: bool | None = None,
+        answered: bool | None = None,
+        draft: bool | None = None,
+    ) -> None:
+        """Set or clear flags on one message or several.
 
-    async def move(self, folder: str, uid: int, destination: str) -> None:
+        Grouped by direction so a bulk "read and flagged" is two round
+        trips, not one per flag per message.
+        """
+        wanted = {
+            FLAG_SEEN: seen,
+            FLAG_FLAGGED: flagged,
+            FLAG_ANSWERED: answered,
+            FLAG_DRAFT: draft,
+        }
+        adding = [flag for flag, on in wanted.items() if on is True]
+        removing = [flag for flag, on in wanted.items() if on is False]
+        if adding:
+            await self._client.store_flags(folder, uid, adding, add=True)
+        if removing:
+            await self._client.store_flags(folder, uid, removing, add=False)
+
+    async def move(self, folder: str, uid: int | list[int], destination: str) -> None:
         await self._client.move(folder, uid, destination)
 
-    async def delete(self, folder: str, uid: int, *, expunge: bool = False) -> None:
+    async def delete(
+        self, folder: str, uid: int | list[int], *, expunge: bool = False
+    ) -> None:
         """Move to Trash, or expunge outright.
 
         Defaults to Trash: an operator running `lightr mailbox delete`
-        almost never means 'destroy irrecoverably'.
+        almost never means 'destroy irrecoverably'. Deleting what is
+        already in Trash removes it for good -- moving it to where it
+        already is would make it undeletable.
         """
-        if expunge:
+        if expunge or folder == TRASH:
             await self._client.store_flags(folder, uid, [FLAG_DELETED], add=True)
             await self._client.expunge(folder, uid)
         else:
-            await self._client.move(folder, uid, "Trash")
+            await self._client.move(folder, uid, TRASH)
+
+    async def empty(self, folder: str) -> int:
+        """Permanently remove everything in a folder. Returns how many."""
+        uids = await self._client.search(folder, "ALL")
+        if uids:
+            await self._client.store_flags(folder, uids, [FLAG_DELETED], add=True)
+            await self._client.expunge(folder, uids)
+        return len(uids)
+
+    async def create_folder(self, name: str) -> None:
+        _check_folder_name(name)
+        await self._client.create_folder(name)
+
+    async def rename_folder(self, name: str, new_name: str) -> None:
+        _refuse_special(name, "renamed")
+        _check_folder_name(new_name)
+        await self._client.rename_folder(name, new_name)
+
+    async def delete_folder(self, name: str) -> None:
+        _refuse_special(name, "deleted")
+        await self._client.delete_folder(name)
+
+
+#: Folders every mailbox has. Mail clients find them by special-use
+#: flag, and Lightr files into them by name -- Junk from the spam
+#: rules, Sent from submission -- so they are not the user's to remove.
+SPECIAL_FOLDERS = ("INBOX", "Sent", "Drafts", "Trash", "Junk", "Archive")
+TRASH = "Trash"
+
+
+def _refuse_special(name: str, verb: str) -> None:
+    if name.upper() == "INBOX" or name in SPECIAL_FOLDERS:
+        raise MailboxError(f"{name} is a system folder and cannot be {verb}")
+
+
+def _check_folder_name(name: str) -> None:
+    """Refuse names IMAP would read as something else.
+
+    `/` is the hierarchy separator, so it is allowed (it makes a
+    subfolder); `*` and `%` are LIST wildcards and control characters
+    have no business in a folder name.
+    """
+    if not name or not name.strip() or name != name.strip():
+        raise MailboxError("a folder name cannot be empty or padded with spaces")
+    if len(name) > 200:
+        raise MailboxError("a folder name can be at most 200 characters")
+    if any(c in name for c in "*%") or any(ord(c) < 32 for c in name):
+        raise MailboxError("a folder name cannot contain *, % or control characters")
+    if name.startswith("/") or name.endswith("/") or "//" in name:
+        raise MailboxError("a folder name cannot start or end with / or contain //")
+    if name.upper() == "INBOX" or name in SPECIAL_FOLDERS:
+        raise MailboxError(f"{name} already exists")
 
 
 __all__ = [
+    "SPECIAL_FOLDERS",
     "Attachment",
     "Folder",
     "IMAPProtocol",

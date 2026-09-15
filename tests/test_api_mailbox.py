@@ -276,3 +276,180 @@ class TestMutations:
             "/v1/mailbox/messages/1", headers=auth(world["mailbox_key"])
         )
         assert response.status_code == 204
+
+
+class TestClientFlags:
+    async def test_answered_and_draft_can_be_set(
+        self, client: httpx.AsyncClient, world: dict
+    ) -> None:
+        response = await client.patch(
+            "/v1/mailbox/messages/2",
+            json={"answered": True},
+            headers=auth(world["mailbox_key"]),
+        )
+        assert response.status_code == 200
+
+    async def test_a_flag_must_be_a_boolean(
+        self, client: httpx.AsyncClient, world: dict
+    ) -> None:
+        """The string "false" is truthy; accepting it would set the flag."""
+        response = await client.patch(
+            "/v1/mailbox/messages/2",
+            json={"read": "false"},
+            headers=auth(world["mailbox_key"]),
+        )
+        assert response.status_code == 400
+
+
+class TestBulk:
+    async def test_mark_several_read(
+        self, client: httpx.AsyncClient, world: dict
+    ) -> None:
+        response = await client.post(
+            "/v1/mailbox/messages/bulk",
+            json={"uids": [2, 3], "read": True},
+            headers=auth(world["mailbox_key"]),
+        )
+        assert response.status_code == 200
+        assert response.json()["updated"] == 2
+
+    async def test_bulk_delete(self, client: httpx.AsyncClient, world: dict) -> None:
+        response = await client.post(
+            "/v1/mailbox/messages/bulk",
+            json={"uids": [1, 2], "delete": True},
+            headers=auth(world["mailbox_key"]),
+        )
+        assert response.status_code == 200
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"uids": [], "read": True},
+            {"uids": "1,2", "read": True},
+            {"uids": [True], "read": True},
+            {"uids": [1]},
+            {"uids": [1], "move_to": "Archive", "delete": True},
+            {"uids": list(range(1, 1002)), "read": True},
+        ],
+    )
+    async def test_bad_requests_are_refused(
+        self, client: httpx.AsyncClient, world: dict, body: dict
+    ) -> None:
+        response = await client.post(
+            "/v1/mailbox/messages/bulk", json=body, headers=auth(world["mailbox_key"])
+        )
+        assert response.status_code == 400
+
+
+@pytest.fixture
+def shared_imap() -> FakeIMAP:
+    """One fake for every request in a test.
+
+    The default fixture builds a fresh fake per connection, which is
+    right for isolation but forgets a folder between creating it and
+    renaming it.
+    """
+    fake = FakeIMAP()
+    fake.messages["Drafts"] = {}
+    imap_client.set_client_factory(lambda cfg, email: fake)
+    return fake
+
+
+class TestFolders:
+    async def test_create_rename_delete(
+        self, client: httpx.AsyncClient, world: dict, shared_imap: FakeIMAP
+    ) -> None:
+        headers = auth(world["mailbox_key"])
+
+        created = await client.post(
+            "/v1/mailbox/folders", json={"name": "Receipts"}, headers=headers
+        )
+        assert created.status_code == 201
+
+        renamed = await client.patch(
+            "/v1/mailbox/folders/Receipts", json={"name": "Receipts/2026"},
+            headers=headers,
+        )
+        assert renamed.status_code == 200
+
+        # A nested name reaches the handler whole, slash included.
+        deleted = await client.delete("/v1/mailbox/folders/Receipts/2026", headers=headers)
+        assert deleted.status_code == 204
+
+    async def test_a_system_folder_cannot_be_deleted(
+        self, client: httpx.AsyncClient, world: dict
+    ) -> None:
+        response = await client.delete(
+            "/v1/mailbox/folders/Junk", headers=auth(world["mailbox_key"])
+        )
+        assert response.status_code == 400
+        assert "system folder" in response.json()["error"]
+
+    async def test_an_unknown_folder_is_a_client_error(
+        self, client: httpx.AsyncClient, world: dict
+    ) -> None:
+        response = await client.delete(
+            "/v1/mailbox/folders/Nope", headers=auth(world["mailbox_key"])
+        )
+        assert response.status_code == 400
+
+    async def test_empty_trash(self, client: httpx.AsyncClient, world: dict) -> None:
+        response = await client.post(
+            "/v1/mailbox/folders/Trash/empty", headers=auth(world["mailbox_key"])
+        )
+        assert response.status_code == 200
+        assert response.json()["removed"] == 0
+
+    async def test_the_inbox_cannot_be_emptied(
+        self, client: httpx.AsyncClient, world: dict
+    ) -> None:
+        response = await client.post(
+            "/v1/mailbox/folders/INBOX/empty", headers=auth(world["mailbox_key"])
+        )
+        assert response.status_code == 400
+
+
+class TestDrafts:
+    @pytest.fixture
+    def imap(self, shared_imap: FakeIMAP) -> FakeIMAP:
+        return shared_imap
+
+    async def test_a_draft_is_stored_with_the_draft_flag(
+        self, client: httpx.AsyncClient, world: dict, imap: FakeIMAP
+    ) -> None:
+        response = await client.post(
+            "/v1/mailbox/drafts",
+            json={"to": "friend@example.test", "subject": "Later", "text": "Half"},
+            headers=auth(world["mailbox_key"]),
+        )
+
+        assert response.status_code == 201
+        ((folder, raw, flags),) = imap.appended
+        assert folder == "Drafts"
+        assert "\\Draft" in flags
+        assert b"From: ops@acme.test" in raw
+        assert b"Subject: Later" in raw
+
+    async def test_replacing_a_draft_removes_the_old_copy(
+        self, client: httpx.AsyncClient, world: dict, imap: FakeIMAP
+    ) -> None:
+        headers = auth(world["mailbox_key"])
+        await client.post("/v1/mailbox/drafts", json={"subject": "v1"}, headers=headers)
+
+        response = await client.post(
+            "/v1/mailbox/drafts", json={"subject": "v2", "replace": 1}, headers=headers
+        )
+
+        assert response.status_code == 201
+        assert list(imap.messages["Drafts"]) == [2]
+
+    async def test_a_header_cannot_be_injected(
+        self, client: httpx.AsyncClient, world: dict, imap: FakeIMAP
+    ) -> None:
+        response = await client.post(
+            "/v1/mailbox/drafts",
+            json={"subject": "hi\r\nBcc: everyone@example.test"},
+            headers=auth(world["mailbox_key"]),
+        )
+        assert response.status_code == 400
+        assert imap.appended == []
