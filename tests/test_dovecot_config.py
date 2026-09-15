@@ -453,3 +453,94 @@ class TestSpamScriptCompilation:
 
         assert warning is not None
         assert "dovecot-sieve" in warning
+
+
+class TestIMAPCertificates:
+    """IMAPS used to present Dovecot's stock certificate -- on Ubuntu a
+    self-signed snakeoil one -- while SMTP presented the real one."""
+
+    def _with_certs(self, configured: Config, tmp_path: Path) -> Config:
+        from lightr.config import DomainCertConfig
+
+        configured.tls.cert_file = tmp_path / "live" / "mail.example.com" / "fullchain.pem"
+        configured.tls.key_file = tmp_path / "live" / "mail.example.com" / "privkey.pem"
+        configured.tls.domain_certs = {
+            "Mail.Other.Test": DomainCertConfig(
+                cert_file=tmp_path / "other" / "fullchain.pem",
+                key_file=tmp_path / "other" / "privkey.pem",
+            )
+        }
+        for path in (
+            configured.tls.cert_file, configured.tls.key_file,
+            tmp_path / "other" / "fullchain.pem", tmp_path / "other" / "privkey.pem",
+        ):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("placeholder", encoding="utf-8")
+        return configured
+
+    def test_the_default_certificate_is_lightrs(
+        self, configured: Config, tmp_path: Path
+    ) -> None:
+        cfg = self._with_certs(configured, tmp_path)
+        conf = dovecot_conf(cfg)
+
+        assert f"ssl_cert = <{cfg.tls.cert_file.as_posix()}" in conf
+        assert f"ssl_key = <{cfg.tls.key_file.as_posix()}" in conf
+
+    def test_each_hostname_gets_its_own_certificate(
+        self, configured: Config, tmp_path: Path
+    ) -> None:
+        cfg = self._with_certs(configured, tmp_path)
+        conf = dovecot_conf(cfg)
+
+        block = conf.split("local_name mail.other.test {", 1)[1].split("}", 1)[0]
+        assert (tmp_path / "other" / "fullchain.pem").as_posix() in block
+        assert (tmp_path / "other" / "privkey.pem").as_posix() in block
+
+    def test_without_a_certificate_it_says_so_and_sets_none(
+        self, configured: Config
+    ) -> None:
+        conf = dovecot_conf(configured)
+        settings = [
+            line.strip() for line in conf.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        assert not any(s.startswith("ssl_cert") for s in settings)
+        assert "lightr setup" in conf
+
+    @pytest.mark.parametrize("name", ["evil } ssl = no {", "has space.test", "no-dot", ""])
+    def test_a_hostname_that_could_escape_the_block_is_refused(
+        self, configured: Config, tmp_path: Path, name: str
+    ) -> None:
+        from lightr.config import DomainCertConfig
+
+        cfg = self._with_certs(configured, tmp_path)
+        cfg.tls.domain_certs = {
+            name: DomainCertConfig(cert_file=tmp_path / "c.pem", key_file=tmp_path / "k.pem")
+        }
+        with pytest.raises(DovecotConfigError, match="invalid hostname"):
+            dovecot_conf(cfg)
+
+    def test_a_hostname_whose_certificate_is_missing_is_skipped(
+        self, configured: Config, tmp_path: Path
+    ) -> None:
+        """A missing file would stop Dovecot starting at all."""
+        from lightr.config import DomainCertConfig
+
+        cfg = self._with_certs(configured, tmp_path)
+        cfg.tls.domain_certs["gone.example.test"] = DomainCertConfig(
+            cert_file=tmp_path / "gone" / "fullchain.pem",
+            key_file=tmp_path / "gone" / "privkey.pem",
+        )
+        conf = dovecot_conf(cfg)
+
+        assert "local_name gone.example.test" not in conf
+        assert "gone.example.test: certificate not found" in conf
+        assert "local_name mail.other.test {" in conf
+
+    def test_the_default_placeholder_paths_are_not_used(self, configured: Config) -> None:
+        """Config defaults tls to data_dir/tls/server.crt, which is not
+        there on a fresh install."""
+        assert configured.tls.cert_file is not None
+        assert not configured.tls.cert_file.exists()
+        assert "ssl_cert = <" not in dovecot_conf(configured)

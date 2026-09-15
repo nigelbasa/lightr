@@ -21,6 +21,7 @@ Two artefacts:
 
 from __future__ import annotations
 
+import re
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
@@ -186,6 +187,8 @@ auth_mechanisms = plain login
 {master_separator}
 disable_plaintext_auth = {"no" if dovecot.imap_use_tls is False else "yes"}
 
+{_ssl_settings(cfg)}
+
 #
 # Authentication cache. Mail clients reconnect constantly, and every
 # reconnect is an HTTP call into Lightr -- which, for an account backed
@@ -326,6 +329,69 @@ def generate(cfg: Config, *, api_base_url: str | None = None) -> list[GeneratedF
         ),
         GeneratedFile(path=spam_script_path(cfg), content=spam_script()),
     ]
+
+
+_HOSTNAME = re.compile(
+    r"^(?=.{1,253}$)"
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
+)
+
+
+def _present(*paths: Path | None) -> bool:
+    """Whether every file exists.
+
+    Checked when the configuration is generated, because Lightr's
+    default tls paths are placeholders under data_dir -- and a Dovecot
+    pointed at a certificate that is not there refuses to start, taking
+    every mailbox down with it.
+    """
+    return all(path is not None and path.is_file() for path in paths)
+
+
+def _ssl_settings(cfg: Config) -> str:
+    """Dovecot's certificates, taken from Lightr's own `tls` settings.
+
+    Without this Dovecot presents whatever its stock 10-ssl.conf names
+    -- on Debian and Ubuntu a self-signed snakeoil certificate -- so
+    every mail client warns on IMAPS while Lightr's SMTP presents the
+    real one. One set of certificates, configured once, for both.
+
+    `domain_certs` become `local_name` blocks, so a client connecting to
+    mail.example.com is shown that name's certificate.
+    """
+    tls = cfg.tls
+    if not _present(tls.cert_file, tls.key_file):
+        return (
+            "# Lightr's tls: certificate was not found, so Dovecot presents\n"
+            "# whatever its own 10-ssl.conf names. Set tls.cert_file and\n"
+            "# tls.key_file to a real certificate, then run: lightr setup"
+        )
+
+    lines = [
+        "#",
+        "# TLS for IMAP, from Lightr's tls: settings.",
+        "#",
+        f"ssl_cert = <{tls.cert_file.as_posix()}",
+        f"ssl_key = <{tls.key_file.as_posix()}",
+        "ssl_min_protocol = TLSv1.2",
+    ]
+    for name, cert in sorted(tls.domain_certs.items()):
+        hostname = name.strip().lower()
+        # The name goes into a config block unquoted; anything that is
+        # not a plain hostname could close the block and add settings.
+        if not _HOSTNAME.match(hostname):
+            raise DovecotConfigError(f"tls.domain_certs has an invalid hostname: {name!r}")
+        if not _present(cert.cert_file, cert.key_file):
+            lines.append(f"# {hostname}: certificate not found, so not served")
+            continue
+        lines += [
+            f"local_name {hostname} {{",
+            f"  ssl_cert = <{cert.cert_file.as_posix()}",
+            f"  ssl_key = <{cert.key_file.as_posix()}",
+            "}",
+        ]
+    return "\n".join(lines)
 
 
 #: The server-wide spam script, under sieve_dir. There rather than in

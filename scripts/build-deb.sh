@@ -80,7 +80,8 @@ for script in "$STAGE/opt/lightr/venv/bin/"*; do
   head -c2 "$script" 2>/dev/null | grep -q '#!' || continue
   sed -i "1s|^#!.*python.*|#!$INSTALLED_AT/bin/python3|" "$script"
 done
-sed -i "s|^home = .*|home = $(dirname "$(command -v "$PYTHON")")|" \n  "$STAGE/opt/lightr/venv/pyvenv.cfg"
+sed -i "s|^home = .*|home = $(dirname "$(command -v "$PYTHON")")|" \
+  "$STAGE/opt/lightr/venv/pyvenv.cfg"
 
 # A launcher on PATH that uses the bundled interpreter.
 cat > "$ROOT/dist/lightr" <<'LAUNCHER'
