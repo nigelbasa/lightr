@@ -20,6 +20,7 @@ from collections.abc import AsyncIterator
 from datetime import timedelta
 from email import message_from_bytes
 from email.message import EmailMessage
+from email.policy import SMTP as SMTP_POLICY
 
 import pytest_asyncio
 from sqlalchemy import update
@@ -206,11 +207,15 @@ class TestForwardsPassSPF:
         assert copy.sender.endswith("@acme.test")
         assert copy.sender.startswith(replies.REPLY_PREFIX)
 
-    async def test_the_from_header_is_left_alone(
+    async def test_a_plain_forward_is_sent_as_the_alias_and_answered_directly(
         self, receive: LightrHandler, engine: AsyncEngine
     ) -> None:
-        """Only the envelope changes. The person reading the forward
-        still sees who wrote it."""
+        """This used to leave the customer's From in place. Through a
+        relay that is refused outright -- Resend answered "not authorized
+        to send emails from students.msu.ac.zw" -- and sent directly it
+        fails the customer's DMARC. The card in the body says who wrote
+        it; Reply-To sends an answer straight to them, since a plain
+        forward relays no replies."""
         await receive.deliver(
             mail_from=ORIGINAL_SENDER, recipients=["info@acme.test"],
             raw=_inbound(to="info@acme.test"),
@@ -219,8 +224,193 @@ class TestForwardsPassSPF:
         (copy,) = await _queued(engine)
         assert copy.raw is not None
         parsed = message_from_bytes(copy.raw)
-        assert ORIGINAL_SENDER in str(parsed["From"])
-        assert parsed["Reply-To"] is None
+        assert replies.header_address(parsed) == "info@acme.test"
+        assert "A Customer via acme.test" in str(parsed["From"])
+        assert str(parsed["Reply-To"]) == ORIGINAL_SENDER
+
+
+def _parts(raw: bytes) -> tuple[str, str, list[str]]:
+    parsed = message_from_bytes(raw, _class=EmailMessage, policy=SMTP_POLICY)
+    text = parsed.get_body(preferencelist=("plain",))
+    html = parsed.get_body(preferencelist=("html",))
+    return (
+        text.get_content() if text is not None else "",
+        html.get_content() if html is not None else "",
+        [p.get_filename() for p in parsed.walk() if p.get_filename()],
+    )
+
+
+class TestTheWrappedCopy:
+    async def test_it_comes_from_the_alias_with_the_token_to_reply_to(
+        self, receive: LightrHandler, engine: AsyncEngine
+    ) -> None:
+        await receive.deliver(
+            mail_from=ORIGINAL_SENDER, recipients=["alice@acme.test"], raw=_inbound()
+        )
+
+        (copy,) = await _queued(engine)
+        assert copy.raw is not None
+        parsed = message_from_bytes(copy.raw)
+        assert replies.header_address(parsed) == "alice@acme.test"
+        assert str(parsed["Reply-To"]).startswith(replies.REPLY_PREFIX)
+        assert parsed["Subject"] == "Order 1234"
+        assert "<order-1234@example.org>" in str(parsed["References"])
+        assert replies.FORWARD_ID_TAG in str(parsed["Message-ID"])
+
+    async def test_the_body_says_who_wrote_it_and_keeps_theirs(
+        self, receive: LightrHandler, engine: AsyncEngine
+    ) -> None:
+        await receive.deliver(
+            mail_from=ORIGINAL_SENDER, recipients=["alice@acme.test"], raw=_inbound()
+        )
+
+        (copy,) = await _queued(engine)
+        assert copy.raw is not None
+        text, html, filenames = _parts(copy.raw)
+        assert text.startswith(replies.FORWARD_MARKER)
+        assert f"From: A Customer <{ORIGINAL_SENDER}>" in text
+        assert "Where is my order?" in text
+        assert replies.HTML_MARKER in html and ORIGINAL_SENDER in html
+        assert filenames == ["receipt.pdf"]
+
+    async def test_an_html_original_keeps_its_html(
+        self, receive: LightrHandler, engine: AsyncEngine
+    ) -> None:
+        message = EmailMessage()
+        message["From"] = f"A Customer <{ORIGINAL_SENDER}>"
+        message["To"] = "alice@acme.test"
+        message["Subject"] = "Styled"
+        message.set_content("plain version")
+        message.add_alternative(
+            "<html><body><p style='color:red'>styled version</p></body></html>",
+            subtype="html",
+        )
+        await receive.deliver(
+            mail_from=ORIGINAL_SENDER, recipients=["alice@acme.test"],
+            raw=message.as_bytes(),
+        )
+
+        (copy,) = await _queued(engine)
+        assert copy.raw is not None
+        _, html, _ = _parts(copy.raw)
+        assert html.index(replies.HTML_MARKER) < html.index("styled version")
+        assert "color:red" in html
+
+    async def test_the_local_copy_is_untouched(
+        self, receive: LightrHandler, engine: AsyncEngine
+    ) -> None:
+        await receive.deliver(
+            mail_from=ORIGINAL_SENDER, recipients=["alice@acme.test"], raw=_inbound()
+        )
+
+        lmtp: RecordingLMTP = receive.lmtp  # type: ignore[assignment]
+        local = message_from_bytes(lmtp.calls[0][1])
+        assert ORIGINAL_SENDER in str(local["From"])
+        assert replies.FORWARD_MARKER.encode() not in lmtp.calls[0][1]
+
+
+def _reply_quoting(copy_raw: bytes, token_address: str, *, mangle: bool = False) -> bytes:
+    """A reply the way Gmail builds one: new text, then the copy quoted."""
+    copy = message_from_bytes(copy_raw, _class=EmailMessage, policy=SMTP_POLICY)
+    text, html, _ = _parts(copy_raw)
+    if mangle:
+        text = text.replace(replies.ORIGINAL_MARKER, "")
+        html = html.replace(replies.HTML_MARKER, "Forwarded")
+    quoted = "\n".join(f"> {line}" for line in text.splitlines())
+
+    reply = EmailMessage()
+    reply["From"] = f"Alice <{BRIDGE_DESTINATION}>"
+    reply["To"] = token_address
+    reply["Subject"] = "Re: Order 1234"
+    reply["In-Reply-To"] = str(copy["Message-ID"])
+    reply["References"] = f"{copy['References']} {copy['Message-ID']}"
+    reply.set_content(
+        f"It shipped yesterday.\n\nOn Tue, A Customer via acme.test <{token_address}> "
+        f"wrote:\n{quoted}\n"
+    )
+    reply.add_alternative(
+        f"<div>It shipped yesterday.</div><blockquote class=\"gmail_quote\">{html}"
+        "</blockquote>",
+        subtype="html",
+    )
+    return reply.as_bytes()
+
+
+async def _bridge_copy(receive: LightrHandler, engine: AsyncEngine) -> tuple[str, bytes]:
+    await receive.deliver(
+        mail_from=ORIGINAL_SENDER, recipients=["alice@acme.test"], raw=_inbound()
+    )
+    (copy,) = await _queued(engine)
+    assert copy.raw is not None
+    async with engine.begin() as conn:
+        await conn.execute(schema.email_queue.delete())
+    return str(message_from_bytes(copy.raw)["Reply-To"]), copy.raw
+
+
+class TestTheReplyLosesTheWrapper:
+    async def test_the_card_is_gone_and_the_conversation_stays(
+        self, receive: LightrHandler, engine: AsyncEngine
+    ) -> None:
+        token_address, copy_raw = await _bridge_copy(receive, engine)
+
+        await receive.deliver(
+            mail_from=BRIDGE_DESTINATION, recipients=[token_address],
+            raw=_reply_quoting(copy_raw, token_address),
+        )
+
+        (reply,) = await _queued(engine)
+        assert reply.raw is not None
+        text, html, _ = _parts(reply.raw)
+        for body in (text, html):
+            assert "It shipped yesterday." in body
+            assert "Where is my order?" in body
+            assert replies.HTML_MARKER not in body
+            assert replies.FORWARD_MARKER not in body
+            assert token_address not in body
+            assert BRIDGE_DESTINATION not in body
+        assert "alice@acme.test" in text
+
+    async def test_it_threads_on_the_original_not_the_copy(
+        self, receive: LightrHandler, engine: AsyncEngine
+    ) -> None:
+        token_address, copy_raw = await _bridge_copy(receive, engine)
+
+        await receive.deliver(
+            mail_from=BRIDGE_DESTINATION, recipients=[token_address],
+            raw=_reply_quoting(copy_raw, token_address),
+        )
+
+        (reply,) = await _queued(engine)
+        assert reply.raw is not None
+        parsed = message_from_bytes(reply.raw)
+        assert parsed["In-Reply-To"] == "<order-1234@example.org>"
+        assert replies.FORWARD_ID_TAG not in str(parsed["References"])
+        assert "<order-1234@example.org>" in str(parsed["References"])
+
+    async def test_a_mangled_card_still_relays_the_reply(
+        self, receive: LightrHandler, engine: AsyncEngine
+    ) -> None:
+        """A client that rewrote the quote beyond recognition: the reply
+        still goes, card and all, rather than being dropped or emptied."""
+        token_address, copy_raw = await _bridge_copy(receive, engine)
+
+        outcome = await receive.deliver(
+            mail_from=BRIDGE_DESTINATION, recipients=[token_address],
+            raw=_reply_quoting(copy_raw, token_address, mangle=True),
+        )
+
+        assert outcome.smtp_response().startswith("250")
+        (reply,) = await _queued(engine)
+        assert reply.raw is not None
+        text, _, _ = _parts(reply.raw)
+        assert "It shipped yesterday." in text
+        assert "Where is my order?" in text
+
+    def test_card_stripping_leaves_ordinary_text_alone(self) -> None:
+        text = "Thanks!\n\n> On Monday you wrote:\n> ---------- something ----------\n"
+        assert replies.strip_card_text(text) == text
+        html = "<div>Thanks</div><table><tr><td>not ours</td></tr></table>"
+        assert replies.strip_card_html(html) == html
 
 
 class TestARepliesGoesBackToTheOriginalSender:

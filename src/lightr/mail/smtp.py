@@ -741,8 +741,16 @@ class LightrHandler:
                     ),
                 )
                 token_address = token.address(domain.name)
-                copy = (
-                    reply_tools.for_bridge(message, token_address) if bridged else message
+                # Sent as the alias, wrapped: see replies.wrap_forward. A
+                # bridge's answer comes back through the token; a plain
+                # forward's goes straight to whoever wrote in.
+                copy = reply_tools.wrap_forward(
+                    message,
+                    alias_address=route.mailbox or route.recipient,
+                    reply_to=(
+                        token_address if bridged
+                        else reply_tools.reply_target(message, mail_from)
+                    ),
                 )
                 await self._queue(
                     conn, domain,
