@@ -198,6 +198,14 @@ class LightrHandler:
                 raw=raw,
                 remote_ip=_peer_ip(session),
                 helo=getattr(session, "host_name", "") or "",
+                # aiosmtpd stores what `authenticate` returned, which is
+                # the account's address. Without this, deliver() had no
+                # way to know who had logged in.
+                authenticated_as=(
+                    str(session.auth_data)
+                    if self.require_auth and getattr(session, "authenticated", False)
+                    else None
+                ),
             )
         except Exception:
             # aiosmtpd would otherwise answer 500 with the exception
@@ -315,9 +323,24 @@ class LightrHandler:
         raw: bytes,
         remote_ip: str = "",
         helo: str = "",
+        authenticated_as: str | None = None,
     ) -> DeliveryOutcome:
-        """Analyse, route, and hand off. The core of the receive path."""
+        """Analyse, route, and hand off. The core of the receive path.
+
+        ``authenticated_as`` is who logged in on submission. When it is
+        given, that account must be allowed to send and the envelope
+        sender must be an address it owns.
+        """
         outcome = DeliveryOutcome()
+
+        if authenticated_as is not None:
+            refusal = await self._may_send(authenticated_as, mail_from)
+            if refusal is not None:
+                log.warning("refused submission by %s as %r: %s",
+                            authenticated_as, mail_from, refusal)
+                outcome.error = refusal
+                outcome.permanent = True
+                return outcome
 
         message = message_from_bytes(raw, policy=SMTP_POLICY)
 
@@ -457,6 +480,53 @@ class LightrHandler:
                     "subject": subject,
                 },
             )
+
+    async def _may_send(self, authenticated_as: str, mail_from: str) -> str | None:
+        """Why this login may not send as this address, or None.
+
+        Submission used to check that *someone* had logged in and
+        nothing else. Any account could send as any address on any
+        domain this server hosts -- and Lightr DKIM-signed the result,
+        so the forgery arrived looking genuine.
+
+        An account may send as its own address, or as an alias that
+        delivers to it: `sales@` forwarding to `ops@` means ops answers
+        sales mail, and refusing that would break the ordinary use of
+        an alias.
+
+        Only the envelope sender is checked, not the From header. The
+        envelope is what SPF and bounces use and what this server signs
+        for; policing the header as well would rule out "on behalf of"
+        sending, which is a decision for later rather than an accident
+        of this one.
+        """
+        from lightr.repo import AccountRepo, AliasRepo, DomainRepo
+
+        login = authenticated_as.strip().lower()
+        sender = mail_from.strip().lower()
+
+        async with self.engine.begin() as conn:
+            account = await AccountRepo(conn).find(login)
+            if account is None:
+                return "Authenticated account no longer exists"
+            if not account.can_send:
+                return "This account is not allowed to send mail"
+            if sender == login:
+                return None
+            if "@" not in sender:
+                return f"Not allowed to send as {mail_from}"
+
+            local_part, domain_name = sender.split("@", 1)
+            try:
+                domain = await DomainRepo(conn).resolve(domain_name)
+            except LookupError:
+                return f"Not allowed to send as {mail_from}"
+            alias = await AliasRepo(conn).lookup(domain.id, local_part)
+            if alias is not None and login in {
+                d.strip().lower() for d in alias.destinations
+            }:
+                return None
+        return f"Not allowed to send as {mail_from}"
 
     async def _enqueue_outbound(
         self, mail_from: str, recipients: list[str], message: Message

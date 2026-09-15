@@ -228,28 +228,66 @@ def update_account(
     display_name: Annotated[str | None, typer.Option("--display-name")] = None,
     quota: Annotated[str | None, typer.Option("--quota", help="e.g. 2GB, or 'none'.")] = None,
     enable: Annotated[bool, typer.Option("--enable", help="Re-enable a disabled account.")] = False,
-    disable: Annotated[bool, typer.Option("--disable", help="Block all logins.")] = False,
+    disable: Annotated[
+        bool, typer.Option("--disable", help="Block logins, sending and receiving.")
+    ] = False,
+    sending: Annotated[
+        bool | None,
+        typer.Option(
+            "--allow-send/--block-send",
+            help="Stop this account sending, without locking its owner out.",
+            show_default=False,
+        ),
+    ] = None,
+    receiving: Annotated[
+        bool | None,
+        typer.Option(
+            "--allow-receive/--block-receive",
+            help="Refuse new mail for this account; what is there stays readable.",
+            show_default=False,
+        ),
+    ] = None,
 ) -> None:
-    """Change account settings. Use `passwd` for the password."""
+    """Change account settings. Use `passwd` for the password.
+
+    --block-send is what a compromised account needs: it stops the
+    spam while the owner can still log in to change the password.
+    --disable blocks everything at once.
+    """
     if enable and disable:
         raise typer.BadParameter("--enable and --disable are mutually exclusive")
 
-    async def _run() -> str:
+    async def _run() -> tuple[str, list[str]]:
         async with db() as conn:
             repo = AccountRepo(conn)
             found = await repo.resolve(account)
+            changes: list[str] = []
             if display_name is not None:
                 found.display_name = display_name
             if quota is not None:
                 found.quota_bytes = None if quota.lower() == "none" else _parse_size(quota)
             if disable:
                 found.auth_mode = AuthMode.DISABLED
+                changes.append("disabled")
             if enable:
-                found.auth_mode = AuthMode.NATIVE
+                # Back to how it authenticated before, not always to a
+                # local password: re-enabling an LDAP account as NATIVE
+                # would leave it with no password it could log in with.
+                found.auth_mode = (
+                    AuthMode.EXTERNAL if found.external_id else AuthMode.NATIVE
+                )
+                changes.append("enabled")
+            if sending is not None:
+                found.can_send = sending
+                changes.append("may send" if sending else "blocked from sending")
+            if receiving is not None:
+                found.can_receive = receiving
+                changes.append("may receive" if receiving else "blocked from receiving")
             await repo.update(found)
-            return found.email or account
+            return found.email or account, changes
 
-    output.success(f"Updated {run(_run)}")
+    email, changes = run(_run)
+    output.success(f"Updated {email}" + (f": {', '.join(changes)}" if changes else ""))
 
 
 @app.command("delete")

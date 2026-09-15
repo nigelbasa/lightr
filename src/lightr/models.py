@@ -108,6 +108,11 @@ class Account(_Record):
     external_id: str | None = None
     quota_bytes: int | None = None
     maildir_path: str | None = None
+    #: Whether this account may send through submission. Off stops a
+    #: compromised account spamming without locking its owner out.
+    can_send: bool = True
+    #: Whether mail addressed to this account is accepted.
+    can_receive: bool = True
     created_at: datetime = Field(default_factory=_now)
 
     # Populated on read when the domain is known; not a stored column.

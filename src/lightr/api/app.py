@@ -275,6 +275,54 @@ async def get_account(request: Request) -> Response:
     return ok(dump(account))
 
 
+async def update_account(request: Request) -> Response:
+    """Change an account's settings, including whether it may send or
+    receive. The password is not settable here -- that is `passwd`,
+    and it is hashed on the server, never accepted pre-hashed."""
+    principal: Principal = request.state.principal
+    principal.require(Permission.WRITE)
+    body = await parse_body(request)
+    conn = request.state.conn
+
+    account = await AccountRepo(conn).resolve(request.path_params["id"])
+    if not principal.may_reach_account(account.id):
+        raise AuthError(403, "this key cannot reach that account")
+
+    allowed = {"display_name", "quota_bytes", "can_send", "can_receive", "disabled"}
+    unknown = set(body) - allowed
+    if unknown:
+        raise AuthError(
+            400,
+            f"cannot change: {', '.join(sorted(unknown))}. "
+            f"Settable: {', '.join(sorted(allowed))}",
+        )
+
+    for flag in ("can_send", "can_receive", "disabled"):
+        if flag in body and not isinstance(body[flag], bool):
+            raise AuthError(400, f"{flag} must be true or false")
+
+    if "display_name" in body:
+        account.display_name = body["display_name"]
+    if "quota_bytes" in body:
+        quota = body["quota_bytes"]
+        if quota is not None and (not isinstance(quota, int) or quota < 0):
+            raise AuthError(400, "quota_bytes must be a non-negative integer or null")
+        account.quota_bytes = quota
+    if "can_send" in body:
+        account.can_send = body["can_send"]
+    if "can_receive" in body:
+        account.can_receive = body["can_receive"]
+    if "disabled" in body:
+        account.auth_mode = (
+            AuthMode.DISABLED
+            if body["disabled"]
+            else (AuthMode.EXTERNAL if account.external_id else AuthMode.NATIVE)
+        )
+
+    await AccountRepo(conn).update(account)
+    return ok(dump(account))
+
+
 async def delete_account(request: Request) -> Response:
     principal: Principal = request.state.principal
     principal.require(Permission.WRITE)
@@ -594,6 +642,7 @@ ROUTES: list[Route] = [
     Route("/v1/accounts", list_accounts, methods=["GET"]),
     Route("/v1/accounts", create_account, methods=["POST"]),
     Route("/v1/accounts/{id}", get_account, methods=["GET"]),
+    Route("/v1/accounts/{id}", update_account, methods=["PATCH"]),
     Route("/v1/accounts/{id}", delete_account, methods=["DELETE"]),
 
     Route("/v1/aliases", list_aliases, methods=["GET"]),

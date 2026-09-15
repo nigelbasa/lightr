@@ -232,7 +232,7 @@ class DomainRepo:
 
 _ACCOUNT_COLUMNS = (
     "id domain_id local_part display_name auth_mode password_hash external_id "
-    "quota_bytes maildir_path created_at"
+    "quota_bytes maildir_path can_send can_receive created_at"
 ).split()
 
 

@@ -103,6 +103,13 @@ accounts = Table(
     Column("used_bytes", BigInteger, server_default="0"),
     # Added by the Dovecot migration: where this account's Maildir lives.
     Column("maildir_path", Text),
+    # Independent of auth_mode, which says *how* an account logs in. A
+    # compromised account needs to stop sending while its owner can
+    # still log in and read what arrived; a departed employee's mailbox
+    # stops receiving while someone reads the backlog. `disabled` does
+    # neither -- it blocks everything at once.
+    Column("can_send", Boolean, nullable=False, server_default="1"),
+    Column("can_receive", Boolean, nullable=False, server_default="1"),
     _created_at(),
     UniqueConstraint("domain_id", "local_part"),
     Index("idx_accounts_email", "domain_id", "local_part"),

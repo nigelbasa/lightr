@@ -48,6 +48,7 @@ class RejectReason(StrEnum):
     SUPPRESSED = "suppressed"
     ALIAS_LOOP = "alias_loop"
     ACCOUNT_DISABLED = "account_disabled"
+    RECEIVING_BLOCKED = "receiving_blocked"
 
     @property
     def smtp_code(self) -> int:
@@ -67,6 +68,10 @@ class RejectReason(StrEnum):
             RejectReason.SUPPRESSED: "Address suppressed",
             RejectReason.ALIAS_LOOP: "Alias loop detected; try again later",
             RejectReason.ACCOUNT_DISABLED: "Mailbox unavailable",
+            # The same words as a disabled account, on purpose. Telling a
+            # stranger *why* a mailbox refuses mail tells them which
+            # accounts an operator has acted on.
+            RejectReason.RECEIVING_BLOCKED: "Mailbox unavailable",
         }[self]
 
 
@@ -127,6 +132,9 @@ class Router:
             if account.auth_mode is AuthMode.DISABLED:
                 return Route(recipient, Disposition.REJECT, domain_id=domain.id,
                              reason=RejectReason.ACCOUNT_DISABLED)
+            if not account.can_receive:
+                return Route(recipient, Disposition.REJECT, domain_id=domain.id,
+                             reason=RejectReason.RECEIVING_BLOCKED)
             return Route(
                 recipient,
                 Disposition.LOCAL,
