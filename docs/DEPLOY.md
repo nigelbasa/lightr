@@ -342,6 +342,104 @@ Per-key limits come from the key itself (`rate_limit` per minute and
 `daily_limit`), so a tenant that needs more can be given more without
 raising it for everyone. Zero means unlimited, everywhere.
 
+### Spam checking
+
+Every inbound message gets a score. The score goes into `X-Spam-Score`
+and the reasons into `X-Lightr-Spam-Reasons`. At `junk_threshold`
+(default 4.0), `X-Spam-Flag: YES` is set and the message is filed into
+Junk. Filing follows the domain's spam policy:
+
+| `--spam-policy` | Flagged mail |
+| --- | --- |
+| `junk` (default) | Filed into Junk. |
+| `tag` | Stays in the inbox; only the headers are set. |
+| `reject` | Filed into Junk, for now. Refusing at SMTP time is not implemented: it would turn every false positive into a bounce the recipient never sees. |
+
+Filing is done by a server-wide Sieve script that `lightr setup` installs
+into `sieve_dir` and Dovecot runs before each mailbox's own filters.
+For mail it files, the mailbox's filters do not run. Nothing is refused
+because of its score.
+
+There are three layers. Each one is optional and adds to the one before:
+
+| | What it does | Turned on by |
+| --- | --- | --- |
+| Lightr's own scorer | SPF, DKIM and DMARC results, executable attachments, malformed headers. | Always on. |
+| DNS blocklists | Checks the connecting address, the sender's domain, and linked domains against Spamhaus, SpamCop, Barracuda and similar lists. | `dnsbl_zones`, `domain_blocklist_zones` |
+| rspamd | A full filter: Bayes learning, fuzzy hashes, its own blocklists, phishing checks. When it answers, its verdict replaces the two layers above. | `rspamd_url` |
+
+#### A local DNS resolver comes first
+
+Blocklists refuse queries that arrive through big public resolvers,
+such as 8.8.8.8, 1.1.1.1 and most cloud providers' defaults. They also
+refuse through anything else sending them heavy traffic. Refused
+queries are not counted as listings, so a server stuck behind one of
+those resolvers simply gets no blocklist protection. Run your own
+resolver:
+
+```bash
+apt install -y unbound
+```
+
+```bash
+systemctl enable --now unbound
+```
+
+Then point the host at it. On Ubuntu that means setting `DNS=127.0.0.1`
+in `/etc/systemd/resolved.conf`, followed by `systemctl restart
+systemd-resolved`. Confirm the change with `resolvectl status`.
+
+#### Blocklists
+
+```yaml
+# /etc/lightr/config.yaml
+spam:
+  dnsbl_zones: [zen.spamhaus.org, bl.spamcop.net]
+  domain_blocklist_zones: [dbl.spamhaus.org]
+```
+
+Before relying on them, check each list actually answers:
+
+```bash
+lightr spam lists
+```
+
+The command asks every list for its fixed test entries. A list shows
+`refused` when queries are reaching it through a public resolver, and
+`lists everything` when the resolver is rewriting answers. In either
+case the command exits non-zero.
+
+Read each list's terms before adding it. Spamhaus is free only for low
+volume and non-commercial use; commercial senders need its Data Query
+Service. One listing adds 3 points (2.5 for a domain), so a listing
+alone does not flag mail as spam, but a listing plus a failed check
+does.
+
+#### rspamd
+
+Install it from rspamd's own package repository. Distribution packages
+lag well behind; the instructions are at <https://rspamd.com/downloads.html>.
+Once it is installed:
+
+```bash
+systemctl enable --now rspamd
+```
+
+```yaml
+spam:
+  rspamd_url: http://127.0.0.1:11333
+```
+
+Lightr posts each message to the normal worker on port 11333, which
+needs no password. Keep that port on loopback. rspamd does its own
+blocklist lookups, so it needs the local resolver too. Bayes learning
+needs Redis (`apt install redis-server`); see rspamd's documentation on
+the statistics module.
+
+If rspamd is down or slow, Lightr logs it and scores the message
+itself, blocklists included. A broken spam filter never means mail
+goes through unchecked.
+
 ---
 
 ## 3. Check it works
