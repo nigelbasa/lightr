@@ -31,7 +31,7 @@ from lightr.apikeys import APIKeyError, APIKeyRepo, KeyType, Permission
 from lightr.config import Config
 from lightr.db.engine import create_engine, ping
 from lightr.dovecot.mailbox import MailboxError
-from lightr.models import Account, Alias, AuthMode, Domain, Organization
+from lightr.models import Account, Alias, AliasType, AuthMode, Domain, Organization
 from lightr.ratelimit import KeyLimiter, limiter
 from lightr.repo import (
     AccountRepo,
@@ -217,21 +217,57 @@ async def delete_domain(request: Request) -> Response:
     return Response(status_code=204)
 
 
-async def list_accounts(request: Request) -> Response:
+async def _visible_domains(request: Request) -> list[UUID] | None:
+    """The domains a listing may show, or None for all of them.
+
+    A `?domain=` the key cannot reach is refused rather than quietly
+    emptied, so a mistyped domain and a forbidden one do not look alike
+    to the operator but neither leaks anything.
+    """
     principal: Principal = request.state.principal
-    principal.require(Permission.READ)
     conn = request.state.conn
 
-    domain_id = None
     if domain_ref := request.query_params.get("domain"):
         domain = await DomainRepo(conn).resolve(domain_ref)
         if not principal.may_reach_domain(domain.id, domain.org_id):
             raise AuthError(403, "this key cannot reach that domain")
-        domain_id = domain.id
-    elif principal.key.domain_id is not None:
-        domain_id = principal.key.domain_id
+        return [domain.id]
+    if principal.key.domain_id is not None and not principal.is_admin:
+        return [principal.key.domain_id]
+    if (org_id := principal.scoped_org()) is not None:
+        return [d.id for d in await DomainRepo(conn).list(org_id=org_id)]
+    if principal.is_admin:
+        return None
+    # Neither admin nor scoped to anything: nothing to show.
+    return []
 
-    accounts = await AccountRepo(conn).list(domain_id=domain_id)
+
+async def _reach_account(request: Request, account: Account) -> None:
+    """Refuse an account outside the key's scope.
+
+    `may_reach_account` only compares account-scoped keys; for an org
+    or domain key it answers True and leaves the rest to the caller.
+    This is the rest: the account's own domain has to be reachable.
+    """
+    principal: Principal = request.state.principal
+    domain = await DomainRepo(request.state.conn).resolve(str(account.domain_id))
+    if not (
+        principal.may_reach_account(account.id)
+        and principal.may_reach_domain(domain.id, domain.org_id)
+    ):
+        raise AuthError(403, "this key cannot reach that account")
+
+
+async def list_accounts(request: Request) -> Response:
+    principal: Principal = request.state.principal
+    principal.require(Permission.READ)
+    repo = AccountRepo(request.state.conn)
+
+    domains = await _visible_domains(request)
+    if domains is None:
+        accounts = await repo.list()
+    else:
+        accounts = [a for d in domains for a in await repo.list(domain_id=d)]
     return ok([dump(a) for a in accounts])
 
 
@@ -272,8 +308,7 @@ async def get_account(request: Request) -> Response:
     principal: Principal = request.state.principal
     principal.require(Permission.READ)
     account = await AccountRepo(request.state.conn).resolve(request.path_params["id"])
-    if not principal.may_reach_account(account.id):
-        raise AuthError(403, "this key cannot reach that account")
+    await _reach_account(request, account)
     return ok(dump(account))
 
 
@@ -287,8 +322,7 @@ async def update_account(request: Request) -> Response:
     conn = request.state.conn
 
     account = await AccountRepo(conn).resolve(request.path_params["id"])
-    if not principal.may_reach_account(account.id):
-        raise AuthError(403, "this key cannot reach that account")
+    await _reach_account(request, account)
 
     allowed = {"display_name", "quota_bytes", "can_send", "can_receive", "disabled"}
     unknown = set(body) - allowed
@@ -330,8 +364,7 @@ async def delete_account(request: Request) -> Response:
     principal.require(Permission.WRITE)
     conn = request.state.conn
     account = await AccountRepo(conn).resolve(request.path_params["id"])
-    if not principal.may_reach_account(account.id):
-        raise AuthError(403, "this key cannot reach that account")
+    await _reach_account(request, account)
     await AccountRepo(conn).delete(account.id)
     return Response(status_code=204)
 
@@ -339,13 +372,88 @@ async def delete_account(request: Request) -> Response:
 async def list_aliases(request: Request) -> Response:
     principal: Principal = request.state.principal
     principal.require(Permission.READ)
+    repo = AliasRepo(request.state.conn)
+
+    domains = await _visible_domains(request)
+    if domains is None:
+        aliases = await repo.list()
+    else:
+        aliases = [a for d in domains for a in await repo.list(domain_id=d)]
+    return ok([dump(a) for a in aliases])
+
+
+async def _reachable_alias(request: Request) -> Alias:
+    principal: Principal = request.state.principal
     conn = request.state.conn
+    alias = await AliasRepo(conn).resolve(request.path_params["id"])
+    domain = await DomainRepo(conn).resolve(str(alias.domain_id))
+    if not principal.may_reach_domain(domain.id, domain.org_id):
+        raise AuthError(403, "this key cannot reach that alias")
+    return alias
 
-    domain_id = None
-    if domain_ref := request.query_params.get("domain"):
-        domain_id = (await DomainRepo(conn).resolve(domain_ref)).id
 
-    return ok([dump(a) for a in await AliasRepo(conn).list(domain_id=domain_id)])
+#: Where one alias may send mail. Enough for a team; not a mailing list.
+MAX_ALIAS_DESTINATIONS = 50
+
+
+def _destinations(value: Any) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise AuthError(400, "destinations must be a non-empty list of addresses")
+    if len(value) > MAX_ALIAS_DESTINATIONS:
+        raise AuthError(400, f"at most {MAX_ALIAS_DESTINATIONS} destinations")
+    cleaned = []
+    for item in value:
+        if (
+            not isinstance(item, str)
+            or item.count("@") != 1
+            or not all(item.split("@"))
+            or any(c.isspace() or c in ",;<>" for c in item)
+        ):
+            raise AuthError(400, f"{item!r} is not an email address")
+        cleaned.append(item.strip().lower())
+    return list(dict.fromkeys(cleaned))
+
+
+def _alias_type(value: Any) -> AliasType:
+    try:
+        return AliasType(value)
+    except ValueError as exc:
+        raise AuthError(
+            400, f"type must be one of: {', '.join(t.value for t in AliasType)}"
+        ) from exc
+
+
+async def update_alias(request: Request) -> Response:
+    """Change where an alias delivers, its type, or whether it is on.
+
+    The source is not changeable: a different address is a different
+    alias, and renaming one in place would silently re-route mail
+    already addressed to the old name.
+    """
+    principal: Principal = request.state.principal
+    principal.require(Permission.WRITE)
+    body = await parse_body(request)
+    alias = await _reachable_alias(request)
+
+    allowed = {"destinations", "type", "is_active"}
+    unknown = set(body) - allowed
+    if unknown:
+        raise AuthError(
+            400,
+            f"cannot change: {', '.join(sorted(unknown))}. "
+            f"Settable: {', '.join(sorted(allowed))}",
+        )
+    if "destinations" in body:
+        alias.destinations = _destinations(body["destinations"])
+    if "type" in body:
+        alias.type = _alias_type(body["type"])
+    if "is_active" in body:
+        if not isinstance(body["is_active"], bool):
+            raise AuthError(400, "is_active must be true or false")
+        alias.is_active = body["is_active"]
+
+    await AliasRepo(request.state.conn).update(alias)
+    return ok(dump(alias))
 
 
 async def create_alias(request: Request) -> Response:
@@ -367,8 +475,8 @@ async def create_alias(request: Request) -> Response:
         Alias(
             domain_id=domain.id,
             source=source,
-            destinations=body["destinations"],
-            type=body.get("type", "forward"),
+            destinations=_destinations(body["destinations"]),
+            type=_alias_type(body.get("type", "forward")),
         )
     )
     return ok(dump(alias), 201)
@@ -377,9 +485,8 @@ async def create_alias(request: Request) -> Response:
 async def delete_alias(request: Request) -> Response:
     principal: Principal = request.state.principal
     principal.require(Permission.WRITE)
-    conn = request.state.conn
-    alias = await AliasRepo(conn).resolve(request.path_params["id"])
-    await AliasRepo(conn).delete(alias.id)
+    alias = await _reachable_alias(request)
+    await AliasRepo(request.state.conn).delete(alias.id)
     return Response(status_code=204)
 
 
@@ -649,6 +756,7 @@ ROUTES: list[Route] = [
 
     Route("/v1/aliases", list_aliases, methods=["GET"]),
     Route("/v1/aliases", create_alias, methods=["POST"]),
+    Route("/v1/aliases/{id}", update_alias, methods=["PATCH"]),
     Route("/v1/aliases/{id}", delete_alias, methods=["DELETE"]),
 
     Route("/v1/apikeys", list_api_keys, methods=["GET"]),

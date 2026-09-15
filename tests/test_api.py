@@ -366,3 +366,151 @@ class TestRouteTable:
         self, client: httpx.AsyncClient, world: dict, path: str
     ) -> None:
         assert (await client.get(path)).status_code == 401
+
+
+class TestCrossTenant:
+    """An org key reaching into another organization's accounts and
+    aliases.
+
+    Domains were scoped; the records under them were not.
+    `may_reach_account` answered True for any org-scoped key ("narrower
+    scopes are checked above"), and nothing above checked. Alias list
+    and delete checked nothing at all.
+    """
+
+    @pytest_asyncio.fixture
+    async def globex(self, engine: AsyncEngine, world: dict) -> dict:
+        from lightr.models import Alias
+        from lightr.repo import AliasRepo
+
+        async with engine.begin() as conn:
+            account = await AccountRepo(conn).create(
+                Account(domain_id=world["globex_domain"].id, local_part="ceo")
+            )
+            alias = await AliasRepo(conn).create(
+                Alias(domain_id=world["globex_domain"].id, source="sales",
+                      destinations=["ceo@globex.test"])
+            )
+        return {"account": account, "alias": alias}
+
+    async def test_cannot_read_another_orgs_account(
+        self, client: httpx.AsyncClient, world: dict, globex: dict
+    ) -> None:
+        response = await client.get(
+            f"/v1/accounts/{globex['account'].id}", headers=auth(world["acme_key"])
+        )
+        assert response.status_code == 403
+
+    async def test_cannot_change_another_orgs_account(
+        self, client: httpx.AsyncClient, world: dict, globex: dict,
+        engine: AsyncEngine,
+    ) -> None:
+        response = await client.patch(
+            f"/v1/accounts/{globex['account'].id}", json={"can_send": False},
+            headers=auth(world["acme_key"]),
+        )
+        assert response.status_code == 403
+        async with engine.begin() as conn:
+            account = await AccountRepo(conn).resolve(str(globex["account"].id))
+        assert account.can_send is True
+
+    async def test_cannot_delete_another_orgs_account(
+        self, client: httpx.AsyncClient, world: dict, globex: dict,
+        engine: AsyncEngine,
+    ) -> None:
+        response = await client.delete(
+            f"/v1/accounts/{globex['account'].id}", headers=auth(world["acme_key"])
+        )
+        assert response.status_code == 403
+        async with engine.begin() as conn:
+            assert await AccountRepo(conn).find("ceo@globex.test") is not None
+
+    async def test_account_list_is_confined_to_the_org(
+        self, client: httpx.AsyncClient, world: dict, globex: dict
+    ) -> None:
+        body = (await client.get("/v1/accounts", headers=auth(world["acme_key"]))).json()
+        assert {a["email"] for a in body} == {"ops@acme.test"}
+
+    async def test_alias_list_is_confined_to_the_org(
+        self, client: httpx.AsyncClient, world: dict, globex: dict
+    ) -> None:
+        body = (await client.get("/v1/aliases", headers=auth(world["acme_key"]))).json()
+        assert body == []
+
+    async def test_alias_list_by_another_orgs_domain_is_refused(
+        self, client: httpx.AsyncClient, world: dict, globex: dict
+    ) -> None:
+        response = await client.get(
+            "/v1/aliases?domain=globex.test", headers=auth(world["acme_key"])
+        )
+        assert response.status_code == 403
+
+    async def test_cannot_delete_another_orgs_alias(
+        self, client: httpx.AsyncClient, world: dict, globex: dict
+    ) -> None:
+        response = await client.delete(
+            f"/v1/aliases/{globex['alias'].id}", headers=auth(world["acme_key"])
+        )
+        assert response.status_code == 403
+
+    async def test_admin_still_sees_everything(
+        self, client: httpx.AsyncClient, world: dict, globex: dict
+    ) -> None:
+        accounts = (await client.get("/v1/accounts",
+                                     headers=auth(world["admin_key"]))).json()
+        assert "ceo@globex.test" in {a["email"] for a in accounts}
+
+
+class TestAliasUpdates:
+    """Changing where an alias goes -- including turning a forward into
+    a bridge that keeps a copy -- without deleting and recreating it."""
+
+    @pytest_asyncio.fixture
+    async def alias_id(self, client: httpx.AsyncClient, world: dict) -> str:
+        created = await client.post(
+            "/v1/aliases",
+            json={"source": "sales@acme.test", "destinations": ["ops@acme.test"]},
+            headers=auth(world["acme_key"]),
+        )
+        return created.json()["id"]
+
+    async def test_destinations_and_type_can_change(
+        self, client: httpx.AsyncClient, world: dict, alias_id: str
+    ) -> None:
+        response = await client.patch(
+            f"/v1/aliases/{alias_id}",
+            json={"destinations": ["a@example.test", "b@example.test"],
+                  "type": "bridge"},
+            headers=auth(world["acme_key"]),
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["destinations"] == ["a@example.test", "b@example.test"]
+        assert response.json()["type"] == "bridge"
+
+    async def test_it_can_be_switched_off(
+        self, client: httpx.AsyncClient, world: dict, alias_id: str
+    ) -> None:
+        response = await client.patch(
+            f"/v1/aliases/{alias_id}", json={"is_active": False},
+            headers=auth(world["acme_key"]),
+        )
+        assert response.json()["is_active"] is False
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"destinations": []},
+            {"destinations": "ops@acme.test"},
+            {"destinations": ["not-an-address"]},
+            {"type": "teleport"},
+            {"is_active": "no"},
+            {"source": "other"},
+        ],
+    )
+    async def test_bad_changes_are_refused(
+        self, client: httpx.AsyncClient, world: dict, alias_id: str, body: dict
+    ) -> None:
+        response = await client.patch(
+            f"/v1/aliases/{alias_id}", json=body, headers=auth(world["acme_key"])
+        )
+        assert response.status_code == 400
