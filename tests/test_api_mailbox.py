@@ -559,3 +559,55 @@ class TestSending:
             headers=auth(world["mailbox_key"]),
         )
         assert response.status_code == 400
+
+    async def test_a_raw_message_is_addressed_from_its_headers(
+        self, client: httpx.AsyncClient, world: dict, engine: AsyncEngine,
+        shared_imap: FakeIMAP,
+    ) -> None:
+        """A client that builds its own MIME sends it whole; To, Cc and
+        Bcc still decide who gets it, and Bcc still does not travel."""
+        raw = (
+            "From: ops@acme.test\r\n"
+            "To: friend@example.test\r\n"
+            "Bcc: boss@example.test\r\n"
+            "Subject: Built by the client\r\n"
+            "Message-ID: <client-built@acme.test>\r\n"
+            "\r\n"
+            "Body.\r\n"
+        )
+
+        response = await client.post(
+            "/v1/mailbox/send", json={"raw": raw}, headers=auth(world["mailbox_key"])
+        )
+
+        assert response.status_code == 202, response.text
+        (queued,) = await self._queued(engine)
+        assert set(queued.to_addrs) == {"friend@example.test", "boss@example.test"}
+        assert b"boss@example.test" not in queued.raw
+        assert b"Built by the client" in queued.raw
+        assert response.json()["message_id"] == "<client-built@acme.test>"
+
+
+class TestShutdown:
+    async def test_webhooks_from_api_sends_are_drained(
+        self, cfg: Config, engine: AsyncEngine
+    ) -> None:
+        """The API's submission handler announces deliveries in the
+        background; shutting down must wait for those, as the SMTP
+        server does for its own handlers."""
+        drained: list[bool] = []
+
+        class Webhooks:
+            async def drain(self) -> None:
+                drained.append(True)
+
+        class Submission:
+            webhooks = Webhooks()
+
+        app = create_app(cfg, engine=engine)
+        app.state.submission = Submission()
+
+        for handler in app.router.on_shutdown:
+            await handler()
+
+        assert drained == [True]

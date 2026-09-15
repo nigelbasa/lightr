@@ -858,11 +858,16 @@ def create_app(cfg: Config, engine: AsyncEngine | None = None) -> Starlette:
     app.state.engine = engine
     app.state.config = cfg
 
-    if owned_engine:
-        async def _dispose() -> None:
+    async def _shutdown() -> None:
+        # Sending through the API creates a submission handler, whose
+        # webhook announcements run as background tasks. Let them
+        # finish, or a restart drops mail.received events on the floor.
+        if (submission := getattr(app.state, "submission", None)) is not None:
+            await submission.webhooks.drain()
+        if owned_engine:
             await engine.dispose()
 
-        app.add_event_handler("shutdown", _dispose)
+    app.add_event_handler("shutdown", _shutdown)
 
     return app
 

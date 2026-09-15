@@ -228,3 +228,34 @@ class TestScoping:
             "/v1/mailbox/filters/not-a-uuid", headers=auth(world["mine"])
         )
         assert response.status_code == 404
+
+
+class RejectingDoveadm:
+    """A doveadm that is installed and refuses the compiled script --
+    the failure a real server gives, which the file-writing fallback
+    never exercises."""
+
+    available = True
+
+    async def install_sieve(self, user: str, script: str) -> None:
+        from lightr.dovecot.doveadm import DoveadmError
+
+        raise DoveadmError("sieve put", 75, "error: line 3: unknown extension")
+
+
+class TestDovecotRejection:
+    async def test_a_script_dovecot_refuses_is_rolled_back(
+        self, cfg: Config, engine: AsyncEngine, world: dict
+    ) -> None:
+        app = create_app(cfg, engine=engine)
+        app.state.doveadm = RejectingDoveadm()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await c.post(
+                "/v1/mailbox/filters", json=RECEIPTS, headers=auth(world["mine"])
+            )
+            listing = await c.get("/v1/mailbox/filters", headers=auth(world["mine"]))
+
+        assert response.status_code == 400
+        assert "unknown extension" in response.json()["error"]
+        assert listing.json() == []

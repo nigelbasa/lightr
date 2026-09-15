@@ -443,7 +443,16 @@ async def send_message(request: Request) -> Response:
     # already written (the key's last-used time), and on SQLite an open
     # write blocks the queue insert that delivery makes on its own
     # connection -- the send would wait out the lock timeout and fail.
+    #
+    # Safe inside the middleware's engine.begin(): its exit sees the
+    # transaction is no longer active and neither commits nor rolls back
+    # again (SQLAlchemy's TransactionalContext, the same on any driver).
+    # What is not safe is using the connection afterwards: it would
+    # autobegin a transaction nothing commits, and the write would be
+    # silently rolled back when the connection closes. So it is taken
+    # away, and a later use fails loudly instead.
     await request.state.conn.commit()
+    request.state.conn = None
 
     outcome = await _submission(request).deliver(
         mail_from=mail_from,
