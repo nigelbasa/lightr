@@ -95,6 +95,20 @@ database:
 lightr migrate && lightr status
 ```
 
+**A Postgres database left by an earlier attempt** is not empty, and
+`migrate` takes it forward from wherever it stopped. The one this was
+written against stopped at `0004`; head is now `0007`:
+
+| | |
+| --- | --- |
+| `0005` | `email_queue.raw` and `envelope_from`, so queued mail is sent whole rather than rebuilt from its subject and body. |
+| `0006` | `accounts.can_send` and `can_receive`, both defaulting to true. |
+| `0007` | `alias_reply_routes`: `account_id` becomes nullable, `domain_id` and `kind` are added. On SQLite this rebuilds the table; on Postgres it is an `ALTER`. |
+
+Take `lightr backup create` before running it, and check that the
+revision `lightr status` reports is `0007` afterwards. Any mail already in the queue from
+before `0005` has no raw copy and still sends, as a plain-text rebuild.
+
 `setup` configures Dovecot as part of its job. If it warns, stop and
 read the warning — mailboxes will not work until it is resolved, and
 the import in step 6 goes through IMAP.

@@ -193,6 +193,9 @@ Publishing to PyPI and installing on a server are both covered in
 sorted before anything else works: a PTR record for your IP, and an
 unblocked port 25.
 
+Building a mail client, over IMAP or the mailbox API, is covered in
+[docs/CLIENTS.md](docs/CLIENTS.md), along with what is not provided.
+
 ## Development
 
 ```bash
