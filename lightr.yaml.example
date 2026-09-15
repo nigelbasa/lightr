@@ -60,7 +60,15 @@ database:
 #   enabled: true
 #   # Score at which a message is filed as Junk rather than delivered.
 #   junk_threshold: 4.0
+#   # A running rspamd. When it answers, its verdict replaces Lightr's
+#   # own scoring, blocklists included; when it is down, Lightr scores.
 #   # rspamd_url: http://127.0.0.1:11333
+#   # DNS blocklists: none until listed here. Most are free only at
+#   # low volume, and refuse queries sent through public resolvers
+#   # (8.8.8.8, 1.1.1.1, most cloud defaults) -- run a local resolver
+#   # such as unbound. Check them with: lightr spam lists
+#   # dnsbl_zones: [zen.spamhaus.org]
+#   # domain_blocklist_zones: [dbl.spamhaus.org]
 
 # webhook:
 #   # Delivery events are POSTed here, signed with a shared secret.

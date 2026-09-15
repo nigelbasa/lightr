@@ -94,3 +94,13 @@ def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "lightr.mail.authentication._dmarc_policy", _no_policy, raising=False
     )
+
+    async def _no_blocklist_lookups(name: str) -> list[str]:
+        # pytest.fail raises a BaseException, so the checker's "a failed
+        # lookup adds nothing" handling cannot swallow it: a test that
+        # configures lists without a fake resolver fails, loudly.
+        pytest.fail(f"a test looked up {name} in real DNS; pass a resolver")
+
+    monkeypatch.setattr(
+        "lightr.mail.reputation.dns_resolver", _no_blocklist_lookups, raising=False
+    )

@@ -862,14 +862,28 @@ class LightrHandler:
             mail_auth.from_domain_of(raw), spf, dkim
         )
 
+        # rspamd, when it answers, has the last word -- including on
+        # blocklists, which its own RBL module checks. Consulting them
+        # here as well would count every listing twice.
         score = await RspamdClient(self.cfg.spam).score(raw)
         if score is None:
+            from lightr.mail.reputation import ReputationChecker
+
+            listings = await ReputationChecker(self.cfg.spam).check(
+                remote_ip=remote_ip,
+                sender_domains=[
+                    mail_from.rsplit("@", 1)[1] if "@" in mail_from else "",
+                    mail_auth.from_domain_of(raw) or "",
+                ],
+                message=message,
+            )
             score = score_message(
                 message,
                 spf=spf,
                 dkim=dkim,
                 dmarc=dmarc,
                 recipient_count=recipient_count,
+                listings=listings,
             )
 
         _, is_junk = score.verdict(self.cfg.spam)

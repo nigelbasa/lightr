@@ -25,6 +25,7 @@ from . import (
     operations,
     output,
     resources,
+    spam,
     webhooks,
 )
 from .context import db, run, state
@@ -50,6 +51,7 @@ app.add_typer(operations.suppression_app, name="suppression")
 app.add_typer(webhooks.app, name="webhook")
 app.add_typer(authproviders.app, name="auth")
 app.add_typer(backup.app, name="backup")
+app.add_typer(spam.app, name="spam")
 
 
 def _version(value: bool) -> None:

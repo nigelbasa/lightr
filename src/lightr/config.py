@@ -163,7 +163,12 @@ class SpamConfig(_Base):
     enabled: bool = True
     suspicious_threshold: float = 2.0
     junk_threshold: float = 4.0
+    #: DNS blocklists for the connecting address, e.g. zen.spamhaus.org.
+    #: Empty means none are consulted. See lightr/mail/reputation.py.
     dnsbl_zones: list[str] = Field(default_factory=list)
+    #: Domain blocklists for the sender's domain and linked domains,
+    #: e.g. dbl.spamhaus.org.
+    domain_blocklist_zones: list[str] = Field(default_factory=list)
     rspamd_url: str = ""
     rspamd_password: str = ""
     timeout_seconds: int = 5

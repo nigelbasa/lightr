@@ -19,11 +19,13 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from email.message import Message
 
 from lightr.config import SpamConfig
 from lightr.mail.authentication import DKIMResult, DMARCResult, Result, SPFResult
+from lightr.mail.reputation import Listing
 
 log = logging.getLogger("lightr.spam")
 
@@ -64,6 +66,14 @@ SUSPICIOUS_ATTACHMENT = 2.0
 MANY_RECIPIENTS = 0.5
 EMPTY_BODY = 0.7
 
+#: Reputation lists. One listed address is not enough to junk mail on
+#: its own (under the default 4.0); a listing plus a failed check, or
+#: two lists agreeing, is. Capped so a dozen lists naming the same
+#: sender count as strong evidence, not as a dozen times it.
+BLOCKLISTED_ADDRESS = 3.0
+BLOCKLISTED_DOMAIN = 2.5
+BLOCKLIST_CAP = 6.0
+
 #: Extensions that are executable on a common desktop. Weighted high
 #: because the cost of a false negative here is malware, not annoyance.
 DANGEROUS_EXTENSIONS = frozenset({
@@ -82,13 +92,29 @@ def score_message(
     dkim: DKIMResult,
     dmarc: DMARCResult,
     recipient_count: int = 1,
+    listings: Iterable[Listing] = (),
 ) -> Score:
-    """Score a message from its authentication results and content."""
+    """Score a message from its authentication results, content, and
+    any reputation-list listings found for it."""
     score = Score()
     _score_authentication(score, spf, dkim, dmarc)
+    _score_reputation(score, listings)
     _score_headers(score, message, recipient_count)
     _score_content(score, message)
     return score
+
+
+def _score_reputation(score: Score, listings: Iterable[Listing]) -> None:
+    remaining = BLOCKLIST_CAP
+    for listing in listings:
+        points = min(
+            BLOCKLISTED_ADDRESS if listing.is_address else BLOCKLISTED_DOMAIN,
+            remaining,
+        )
+        if points <= 0:
+            break
+        score.add(points, listing.reason)
+        remaining -= points
 
 
 def _score_authentication(
