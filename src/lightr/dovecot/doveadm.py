@@ -250,6 +250,19 @@ class Doveadm:
         """Rebuild a mailbox's index. The fix for a corrupt index."""
         await self.run("force-resync", "-u", user, "INBOX*")
 
+    async def index(self, user: str, mailbox: str = "*", *, timeout: float = 600.0) -> None:
+        """Build the full-text search index for a mailbox.
+
+        Dovecot indexes mail as it arrives once fts_autoindex is on, but
+        nothing indexes what was already there -- so the first search of
+        an existing mailbox finds none of it until this has run.
+
+        Not force_resync: that rebuilds Dovecot's own index files, which
+        is what you do to a corrupt mailbox, not to a missing search
+        index.
+        """
+        await self.run("index", "-u", user, mailbox, timeout=timeout)
+
     # -- passwords and service --------------------------------------------
 
     async def pw(self, password: str, scheme: str = "CRYPT") -> str:

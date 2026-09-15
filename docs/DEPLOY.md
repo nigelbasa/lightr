@@ -484,6 +484,41 @@ If rspamd is down or slow, Lightr logs it and scores the message
 itself, blocklists included. A broken spam filter never means mail
 goes through unchecked.
 
+### Searching message bodies
+
+Searching works without any of this -- `lightr mailbox list --text`, and
+the API's `?text=` -- but Dovecot answers by opening every message in
+the folder. A mailbox with years of mail in it feels that; a small one
+never will.
+
+An index makes it constant-time, at the cost of one package and a little
+disk:
+
+```bash
+apt install dovecot-fts-xapian
+```
+
+```yaml
+# /etc/lightr/config.yaml
+dovecot:
+  fts: xapian
+```
+
+```bash
+lightr dovecot install     # rewrites Dovecot's config with the plugin
+systemctl reload dovecot
+lightr dovecot index --all # index the mail already there
+```
+
+New mail is indexed as it arrives. `lightr dovecot index` exists because
+nothing indexes what was delivered before the plugin was installed, so
+without it the first search of an old mailbox finds nothing.
+
+**The plugin has to be installed before the setting is turned on.**
+Dovecot does not warn about a plugin it cannot load: every IMAP session
+fails. `lightr preflight` refuses to pass in that state, and says which
+package is missing.
+
 ### Sending through a relay
 
 A server on a small or residential IP, or one whose reverse DNS you

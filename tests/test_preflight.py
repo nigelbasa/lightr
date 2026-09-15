@@ -165,6 +165,51 @@ class TestDovecotModules:
         assert report.checks == []
 
 
+class TestFullTextSearch:
+    """A search backend named in mail_plugins but not installed is not a
+    warning at startup: every IMAP session fails."""
+
+    def test_nothing_is_checked_when_search_is_off(
+        self, cfg: Config, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(preflight, "dovecot_version", lambda: (2, 3, 16))
+        report = preflight.Report()
+        preflight.check_fts(report, cfg)
+
+        assert [c.name for c in report.checks] == []
+
+    def test_a_missing_backend_is_fatal_and_names_the_package(
+        self, cfg: Config, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from lightr.config import FtsEngine
+
+        cfg.dovecot.fts = FtsEngine.XAPIAN
+        monkeypatch.setattr(preflight, "dovecot_version", lambda: (2, 3, 16))
+        monkeypatch.setattr(Path, "exists", lambda self: False)
+        report = preflight.Report()
+        preflight.check_fts(report, cfg)
+
+        (check,) = report.checks
+        assert check.level is Level.FAIL
+        assert "dovecot-fts-xapian" in (check.fix or "")
+        assert "set dovecot.fts: none" in (check.fix or "")
+
+    def test_an_installed_backend_passes(
+        self, cfg: Config, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from lightr.config import FtsEngine
+
+        cfg.dovecot.fts = FtsEngine.XAPIAN
+        monkeypatch.setattr(preflight, "dovecot_version", lambda: (2, 3, 16))
+        monkeypatch.setattr(Path, "exists", lambda self: True)
+        report = preflight.Report()
+        preflight.check_fts(report, cfg)
+
+        (check,) = report.checks
+        assert check.level is Level.OK
+        assert "xapian" in check.detail
+
+
 class TestDatabaseDriver:
     def test_a_missing_driver_is_fatal(
         self, cfg: Config, monkeypatch: pytest.MonkeyPatch

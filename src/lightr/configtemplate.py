@@ -82,6 +82,15 @@ database:
 #   # is plain HTTP and sees plaintext passwords. See docs/DEPLOY.md.
 #   addr: ":8080"
 
+# dovecot:
+#   # Searching message bodies. Without an index Dovecot opens every
+#   # message to answer one search: unnoticeable on a small mailbox,
+#   # slow on a large one. "xapian" needs dovecot-fts-xapian installed
+#   # -- naming a plugin Dovecot cannot load fails every IMAP session,
+#   # so preflight refuses to pass until it is there. After turning it
+#   # on: lightr dovecot install && lightr dovecot index --all
+#   fts: none
+
 # tls:
 #   # Used for SMTP STARTTLS. Point these at your certificate; without
 #   # one, submission refuses to accept a password.

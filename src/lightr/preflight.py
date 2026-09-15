@@ -194,6 +194,44 @@ def check_dovecot_modules(report: Report, cfg: Config) -> None:
     _check_userdb_driver(report, cfg)
 
 
+#: Where each search backend's plugin lives, and what installs it.
+FTS_BACKENDS: dict[str, tuple[str, str]] = {
+    "xapian": (
+        "/usr/lib/dovecot/modules/lib21_fts_xapian_plugin.so",
+        "dovecot-fts-xapian",
+    ),
+}
+
+
+def check_fts(report: Report, cfg: Config) -> None:
+    """A search index Dovecot cannot load takes IMAP down with it.
+
+    Naming a missing plugin in mail_plugins is not a warning at startup:
+    every IMAP session fails. So this is a hard failure whenever the
+    config asks for a backend that is not installed.
+    """
+    engine = str(cfg.dovecot.fts)
+    if engine == "none" or dovecot_version() is None:
+        return
+
+    backend = FTS_BACKENDS.get(engine)
+    if backend is None:
+        report.add("dovecot-fts", Level.FAIL, f"unknown search backend {engine!r}")
+        return
+
+    path, package = backend
+    if Path(path).exists():
+        report.add("dovecot-fts", Level.OK, f"{package} ({engine})")
+        return
+    report.add(
+        "dovecot-fts",
+        Level.FAIL,
+        f"dovecot.fts is {engine!r} but {package} is not installed; "
+        "every IMAP session would fail",
+        f"apt install {package}, or set dovecot.fts: none",
+    )
+
+
 def _check_userdb_driver(report: Report, cfg: Config) -> None:
     """Dovecot needs its own driver for Lightr's database.
 
@@ -372,6 +410,7 @@ def run(cfg: Config, config_path: Path | None = None) -> Report:
     check_database_driver(report, cfg)
     check_dovecot(report)
     check_dovecot_modules(report, cfg)
+    check_fts(report, cfg)
     check_doveconf(report)
     check_system_auth(report)
     return report

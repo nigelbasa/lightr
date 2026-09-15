@@ -26,7 +26,7 @@ import secrets
 from dataclasses import dataclass
 from pathlib import Path
 
-from lightr.config import Config
+from lightr.config import Config, FtsEngine
 from lightr.dovecot import checkpassword, userdb
 
 CONF_NAME = "99-lightr.conf"
@@ -108,6 +108,24 @@ def dovecot_conf(cfg: Config, lua_path: Path | None = None) -> str:
     )
     spam_script = spam_script_path(cfg).as_posix()
     first_valid_uid = mail_user_uid()
+
+    # Full-text search, only when an operator asked for it: a plugin
+    # Dovecot cannot load takes every IMAP session down with it.
+    fts_plugins = ""
+    fts_settings = ""
+    if dovecot.fts is FtsEngine.XAPIAN:
+        fts_plugins = " fts fts_xapian"
+        fts_settings = """
+  # Full-text search. partial=3 is the shortest prefix a search matches,
+  # full=20 the longest word indexed whole; both are fts-xapian's own
+  # defaults. autoindex builds the index as mail arrives, so the first
+  # search after delivery is not the one that pays for it.
+  fts = xapian
+  fts_xapian = partial=3 full=20 verbose=0
+  fts_autoindex = yes
+  # Answer from the index or say so, rather than quietly falling back to
+  # opening every message -- which is the slowness the index exists for.
+  fts_enforced = yes"""
 
     master_user_block = ""
     master_separator = ""
@@ -209,7 +227,7 @@ auth_cache_size = 10M
 auth_cache_ttl = 5 mins
 auth_cache_negative_ttl = 30 secs
 
-mail_plugins = $mail_plugins quota
+mail_plugins = $mail_plugins quota{fts_plugins}
 
 #
 # What mail clients rely on. imap_quota answers GETQUOTAROOT, which is
@@ -218,7 +236,7 @@ mail_plugins = $mail_plugins quota
 # autoexpunge uses to find old mail without scanning every message.
 #
 protocol imap {{
-  mail_plugins = $mail_plugins imap_quota
+  mail_plugins = $mail_plugins imap_quota{fts_plugins}
   mail_max_userip_connections = 20
 }}
 mailbox_list_index = yes
@@ -287,7 +305,7 @@ plugin {{
   quota = maildir:User quota
   quota_status_success = DUNNO
   quota_status_nouser = DUNNO
-  quota_status_overquota = "552 5.2.2 Mailbox is full"
+  quota_status_overquota = "552 5.2.2 Mailbox is full"{fts_settings}
 }}
 
 #

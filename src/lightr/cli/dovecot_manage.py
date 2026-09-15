@@ -207,4 +207,60 @@ def resync(
     output.success(f"Rebuilt the index for {run(_run)}")
 
 
-__all__ = ["install", "quota", "resync", "status"]
+def index(
+    account: Annotated[
+        str | None, typer.Argument(help="Mailbox to index. Omit this with --all.")
+    ] = None,
+    all_accounts: Annotated[
+        bool, typer.Option("--all", help="Every mailbox on this server.")
+    ] = False,
+) -> None:
+    """Build the full-text search index for a mailbox.
+
+    Mail is indexed as it arrives once ``dovecot.fts`` is on. Nothing
+    indexes what was delivered before that, so until this has run a
+    search of an existing mailbox finds none of it.
+
+    Not `resync`: that rebuilds Dovecot's own index files, which is what
+    you do to a corrupt mailbox.
+    """
+    from lightr.config import FtsEngine
+
+    if bool(account) == all_accounts:
+        raise typer.BadParameter("name a mailbox, or pass --all")
+    if state.config.dovecot.fts is FtsEngine.NONE:
+        output.warn(
+            "dovecot.fts is none, so nothing will read the index. "
+            "Set it, then: lightr dovecot install"
+        )
+
+    async def _run() -> tuple[list[str], list[str]]:
+        async with db() as conn:
+            repo = AccountRepo(conn)
+            found = (
+                await repo.list() if all_accounts else [await repo.resolve(account or "")]
+            )
+
+        doveadm = Doveadm()
+        indexed: list[str] = []
+        failed: list[str] = []
+        for record in found:
+            if record.email is None:  # pragma: no cover - resolve always sets it
+                continue
+            try:
+                await doveadm.index(record.email)
+            except DoveadmError as exc:
+                # One unreadable mailbox must not stop the rest.
+                output.warn(f"{record.email}: {exc}")
+                failed.append(record.email)
+                continue
+            indexed.append(record.email)
+        return indexed, failed
+
+    indexed, failed = run(_run)
+    output.success(f"Indexed {len(indexed)} mailbox(es)")
+    if failed:
+        raise typer.Exit(1)
+
+
+__all__ = ["index", "install", "quota", "resync", "status"]

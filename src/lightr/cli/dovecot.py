@@ -32,6 +32,7 @@ app.command("install")(dovecot_manage.install)
 app.command("status")(dovecot_manage.status)
 app.command("quota")(dovecot_manage.quota)
 app.command("resync")(dovecot_manage.resync)
+app.command("index")(dovecot_manage.index)
 
 
 @app.command("rotate-key")

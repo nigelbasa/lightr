@@ -35,6 +35,13 @@ class DatabaseDriver(StrEnum):
     POSTGRES = "postgres"
 
 
+class FtsEngine(StrEnum):
+    """Which full-text search index Dovecot keeps, if any."""
+
+    NONE = "none"
+    XAPIAN = "xapian"
+
+
 class ServerConfig(_Base):
     hostname: str = "localhost"
     bind_address: str = "0.0.0.0"
@@ -127,6 +134,14 @@ class DovecotConfig(_Base):
     # Admin.
     doveadm_url: str = "http://127.0.0.1:8080/doveadm/v1"
     doveadm_api_key: str = ""
+
+    # Searching message bodies. Without an index Dovecot opens every
+    # message to answer one search, which a small mailbox never notices
+    # and a large one does. "xapian" needs dovecot-fts-xapian installed:
+    # naming a plugin Dovecot cannot load breaks every IMAP session, so
+    # this stays off until an operator turns it on, and preflight
+    # refuses to pass when it is on without the plugin.
+    fts: FtsEngine = FtsEngine.NONE
 
     # Storage. Maildir, deliberately -- see docs/PYTHON-REWRITE.md section 3.
     maildir_root: Path = Path("/var/mail/lightr")

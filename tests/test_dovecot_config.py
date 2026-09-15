@@ -121,6 +121,42 @@ class TestAuthWiring:
         assert "pass = yes" not in block
 
 
+class TestFullTextSearch:
+    """Off unless asked for: mail_plugins naming a plugin Dovecot cannot
+    load does not warn, it fails every IMAP session."""
+
+    def test_nothing_is_indexed_by_default(self, configured: Config) -> None:
+        conf = dovecot_conf(configured)
+        # Not `"fts" not in conf`: that matches the word "Drafts".
+        for setting in ("fts_xapian", "fts = xapian", "fts_autoindex", "fts_enforced"):
+            assert setting not in conf, setting
+
+    def test_xapian_is_loaded_for_both_mail_and_imap(self, configured: Config) -> None:
+        from lightr.config import FtsEngine
+
+        configured.dovecot.fts = FtsEngine.XAPIAN
+        conf = dovecot_conf(configured)
+
+        globals_line = next(
+            line for line in conf.splitlines() if line.startswith("mail_plugins =")
+        )
+        imap_block = conf.split("protocol imap {", 1)[1].split("}", 1)[0]
+        assert "fts fts_xapian" in globals_line
+        assert "fts fts_xapian" in imap_block
+
+    def test_the_index_is_kept_up_to_date_and_actually_used(
+        self, configured: Config
+    ) -> None:
+        from lightr.config import FtsEngine
+
+        configured.dovecot.fts = FtsEngine.XAPIAN
+        block = dovecot_conf(configured).split("plugin {", 1)[1].split("\n}", 1)[0]
+
+        assert "fts = xapian" in block
+        assert "fts_autoindex = yes" in block
+        assert "fts_enforced = yes" in block
+
+
 class TestSieveWiring:
     def test_extensions_the_generator_emits_are_enabled(
         self, configured: Config
