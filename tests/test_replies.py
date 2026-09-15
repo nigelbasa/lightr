@@ -269,8 +269,11 @@ class TestTheWrappedCopy:
         text, html, filenames = _parts(copy.raw)
         assert text.startswith(replies.FORWARD_MARKER)
         assert f"From: A Customer <{ORIGINAL_SENDER}>" in text
-        assert "Where is my order?" in text
+        assert replies.REPLY_HINT in text
+        assert text.index(replies.REPLY_HINT) < text.index("Where is my order?")
         assert replies.HTML_MARKER in html and ORIGINAL_SENDER in html
+        assert html.index(replies.HTML_MARKER) < html.index(replies.REPLY_HINT)
+        assert ">AC<" in html, "the sender's initials"
         assert filenames == ["receipt.pdf"]
 
     async def test_an_html_original_keeps_its_html(
@@ -314,7 +317,7 @@ def _reply_quoting(copy_raw: bytes, token_address: str, *, mangle: bool = False)
     copy = message_from_bytes(copy_raw, _class=EmailMessage, policy=SMTP_POLICY)
     text, html, _ = _parts(copy_raw)
     if mangle:
-        text = text.replace(replies.ORIGINAL_MARKER, "")
+        text = text.replace(replies.REPLY_HINT, "")
         html = html.replace(replies.HTML_MARKER, "Forwarded")
     quoted = "\n".join(f"> {line}" for line in text.splitlines())
 
@@ -324,14 +327,40 @@ def _reply_quoting(copy_raw: bytes, token_address: str, *, mangle: bool = False)
     reply["Subject"] = "Re: Order 1234"
     reply["In-Reply-To"] = str(copy["Message-ID"])
     reply["References"] = f"{copy['References']} {copy['Message-ID']}"
+    # Gmail's attribution names the copy's From, wrapped where it is long.
     reply.set_content(
-        f"It shipped yesterday.\n\nOn Tue, A Customer via acme.test <{token_address}> "
-        f"wrote:\n{quoted}\n"
+        "It shipped yesterday.\n\nOn Wed, 16 Sept 2026, 00:14 A Customer via acme.test,\n"
+        f"<alice@acme.test> wrote:\n\n{quoted}\n"
     )
     reply.add_alternative(
-        f"<div>It shipped yesterday.</div><blockquote class=\"gmail_quote\">{html}"
-        "</blockquote>",
+        "<div>It shipped yesterday.</div><br><div class=\"gmail_quote\">"
+        "<div dir=\"ltr\" class=\"gmail_attr\">On Wed, 16 Sept 2026, 00:14 A Customer "
+        "via acme.test, &lt;alice@acme.test&gt; wrote:<br></div>"
+        f"<blockquote class=\"gmail_quote\">{html}</blockquote></div>",
         subtype="html",
+    )
+    return reply.as_bytes()
+
+
+def _gmail_style_reply(token_address: str) -> bytes:
+    """A reply as Gmail really sent one on 2026-09-16: its text part built
+    from the HTML, so the quoted card has no text-card lines at all, and
+    the first version's closing line naming the sender."""
+    reply = EmailMessage()
+    reply["From"] = f"Alice <{BRIDGE_DESTINATION}>"
+    reply["To"] = token_address
+    reply["Subject"] = "Re: Order 1234"
+    reply.set_content(
+        "Received, thanks.\n\n"
+        "On Wed, 16 Sept 2026, 00:14 A CUSTOMER WITH A LONG NAME via acme.test,\n"
+        "<alice@acme.test> wrote:\n\n"
+        "> Forwarded by Lightr\n"
+        f"> *From:* A Customer <{ORIGINAL_SENDER}>\n"
+        "> *Date:* Wed, 16 Sep 2026 00:14:20 +0200\n"
+        "> *Subject:* Order 1234\n"
+        "> *To:* Alice <alice@acme.test>\n"
+        "> Reply to this message to answer A CUSTOMER WITH A LONG NAME.\n"
+        "> Where is my order?\n"
     )
     return reply.as_bytes()
 
@@ -364,11 +393,51 @@ class TestTheReplyLosesTheWrapper:
         for body in (text, html):
             assert "It shipped yesterday." in body
             assert "Where is my order?" in body
-            assert replies.HTML_MARKER not in body
             assert replies.FORWARD_MARKER not in body
+            assert replies.REPLY_HINT not in body
             assert token_address not in body
             assert BRIDGE_DESTINATION not in body
-        assert "alice@acme.test" in text
+
+    async def test_the_quote_line_names_the_real_sender(
+        self, receive: LightrHandler, engine: AsyncEngine
+    ) -> None:
+        """Outlook showed the customer their own message as having come
+        from alice@acme.test: Gmail's "wrote:" line names the copy's From."""
+        token_address, copy_raw = await _bridge_copy(receive, engine)
+
+        await receive.deliver(
+            mail_from=BRIDGE_DESTINATION, recipients=[token_address],
+            raw=_reply_quoting(copy_raw, token_address),
+        )
+
+        (reply,) = await _queued(engine)
+        assert reply.raw is not None
+        text, html, _ = _parts(reply.raw)
+        text = text.replace("\r\n", "\n")
+        assert f"A Customer\n<{ORIGINAL_SENDER}> wrote:" in text
+        assert f"A Customer &lt;{ORIGINAL_SENDER}&gt; wrote:" in html
+        for body in (text, html):
+            assert "via acme.test" not in body
+
+    async def test_a_card_quoted_from_gmails_html_is_removed(
+        self, receive: LightrHandler, engine: AsyncEngine
+    ) -> None:
+        token_address, _ = await _bridge_copy(receive, engine)
+
+        await receive.deliver(
+            mail_from=BRIDGE_DESTINATION, recipients=[token_address],
+            raw=_gmail_style_reply(token_address),
+        )
+
+        (reply,) = await _queued(engine)
+        assert reply.raw is not None
+        text, _, _ = _parts(reply.raw)
+        assert "Received, thanks." in text
+        assert "> Where is my order?" in text
+        assert "Forwarded by Lightr" not in text
+        assert "*From:*" not in text
+        assert "Reply to this message" not in text
+        assert f"<{ORIGINAL_SENDER}> wrote:" in text
 
     async def test_it_threads_on_the_original_not_the_copy(
         self, receive: LightrHandler, engine: AsyncEngine

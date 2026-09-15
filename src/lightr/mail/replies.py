@@ -164,13 +164,19 @@ def header_address(message: Message, header: str = "From") -> str:
 
 
 #: The first and last lines of the header card a forwarded copy opens
-#: with, in its text part. A reply quotes them, and the lines between
-#: them are what comes out again before the reply is relayed.
-FORWARD_MARKER = "---------- Forwarded by Lightr ----------"
-ORIGINAL_MARKER = "---------- Original message ----------"
-#: The caption of the card's HTML table, which is how that table is
-#: found again inside a quoted reply.
-HTML_MARKER = "Forwarded by Lightr"
+#: with. A reply quotes them and the lines between them come out again
+#: before it is relayed. Both the text and the HTML card use exactly
+#: these words, top and bottom: Gmail builds a reply's text part from
+#: its HTML, so the text card itself never reaches the quote. The last
+#: line is short and names nobody, so no client wraps it.
+FORWARD_MARKER = "Forwarded by Lightr"
+REPLY_HINT = "Reply to this email to answer the sender."
+#: The caption the HTML card's table is found by in a quoted reply.
+HTML_MARKER = FORWARD_MARKER
+#: How the first version of the card began and ended. Replies to copies
+#: sent with it keep arriving for as long as their tokens live.
+_LEGACY_STARTS = ("---------- Forwarded by Lightr ----------",)
+_LEGACY_ENDS = ("---------- Original message ----------", "Reply to this message to answer")
 #: In the Message-ID of every wrapped copy, so a reply's References can
 #: be cleaned of it: the original sender never saw that message.
 FORWARD_ID_TAG = "lightr-fwd"
@@ -216,36 +222,49 @@ def wrap_forward(message: Message, *, alias_address: str, reply_to: str) -> Emai
     if in_reply_to := _one_line(message.get("In-Reply-To")):
         wrapped["In-Reply-To"] = in_reply_to
 
-    fields = [
-        (label, _one_line(message.get(label)))
-        for label in ("From", "Date", "Subject", "To", "Cc")
-    ]
-    fields = [(label, value) for label, value in fields if value]
-    hint = f"Reply to this message to answer {shown}."
+    original_to = _one_line(message.get("To")) or alias_address
+    date = _one_line(message.get("Date"))
+    cc = _one_line(message.get("Cc"))
 
     text_part, html_part = _bodies(message)
     original_text = text_part.get_content() if text_part is not None else (
         _html_to_text(html_part.get_content()) if html_part is not None else ""
     )
-    card_text = "\n".join(
-        [FORWARD_MARKER, *(f"{label}: {value}" for label, value in fields), hint,
-         ORIGINAL_MARKER, ""]
-    )
-    wrapped.set_content(card_text + "\n" + original_text)
+    card_lines = [
+        FORWARD_MARKER,
+        f"From: {formataddr((name, sender)) if sender else shown}",
+        f"To: {original_to}",
+        *([f"Cc: {cc}"] if cc else []),
+        *([f"Date: {date}"] if date else []),
+        REPLY_HINT,
+    ]
+    wrapped.set_content("\n".join(card_lines) + "\n\n" + original_text)
 
-    rows = "<br>".join(
-        f"<b>{escape(label)}:</b> {escape(value)}" for label, value in fields
+    initials = "".join(w[0] for w in re.findall(r"[A-Za-z0-9]+", shown)[:2]).upper() or "?"
+    hue = sum(ord(c) for c in (sender or shown)) % 360
+    muted = "color:#5f6368;font-size:12px"
+    meta = " &middot; ".join(
+        escape(v) for v in (f"to {original_to}", f"cc {cc}" if cc else "", date) if v
     )
     card_html = (
         '<table role="presentation" cellpadding="0" cellspacing="0" '
-        'style="border:1px solid #d9dde3;border-radius:8px;margin:0 0 16px;'
-        "width:100%;max-width:640px;font-family:Arial,Helvetica,sans-serif;"
-        'font-size:13px;color:#3c4043">'
-        '<tr><td style="padding:10px 14px;border-bottom:1px solid #e8eaed;'
-        f'font-weight:bold;color:#1a73e8">{HTML_MARKER}</td></tr>'
-        f'<tr><td style="padding:10px 14px;line-height:1.5">{rows}'
-        f'<div style="margin-top:6px;color:#5f6368">{escape(hint)}</div>'
-        "</td></tr></table>"
+        'style="border:1px solid #dadce0;border-radius:10px;margin:0 0 18px;'
+        "width:100%;max-width:640px;border-collapse:separate;"
+        'font-family:Arial,Helvetica,sans-serif;color:#202124">'
+        f'<tr><td colspan="2" style="padding:8px 14px;background:#f1f3f4;'
+        f'border-radius:10px 10px 0 0;{muted};letter-spacing:.3px">'
+        f"{FORWARD_MARKER}</td></tr>"
+        '<tr><td style="padding:12px 0 12px 14px;width:40px;vertical-align:top">'
+        f'<div style="width:36px;height:36px;border-radius:18px;'
+        f"background:hsl({hue},45%,42%);color:#fff;font-size:14px;font-weight:bold;"
+        f'line-height:36px;text-align:center">{escape(initials)}</div></td>'
+        '<td style="padding:12px 14px;vertical-align:top;line-height:1.35">'
+        f'<div style="font-size:15px;font-weight:bold">{escape(name or sender or shown)}</div>'
+        + (f'<div style="font-size:13px;color:#1a73e8">{escape(sender)}</div>'
+           if name and sender else "")
+        + f'<div style="{muted};margin-top:2px">{meta}</div></td></tr>'
+        f'<tr><td colspan="2" style="padding:8px 14px;border-top:1px solid #e8eaed;'
+        f'{muted}">{REPLY_HINT}</td></tr></table>'
     )
     if html_part is not None:
         original_html = html_part.get_content()
@@ -304,8 +323,7 @@ def clean_reply(message: Message, route: ReplyRoute) -> Message:
     copy["From"] = formataddr((display_name, route.local_address))
     copy["To"] = route.original_from
 
-    token_address = reply_address(route.token, route.local_address.rsplit("@", 1)[-1])
-    _unwrap_bodies(copy, token_address=token_address, alias_address=route.local_address)
+    _unwrap_bodies(copy, route)
     _drop_forward_ids(copy)
     return copy
 
@@ -327,8 +345,31 @@ def _html_to_text(html: str) -> str:
     return unescape(_HTML_TAG.sub("", html))
 
 
-def _unwrap_bodies(message: Message, *, token_address: str, alias_address: str) -> None:
+def _attribution(route: ReplyRoute, *, html: bool) -> tuple[re.Pattern[str], str]:
+    """A quote line naming the wrapped copy's sender, and its repair.
+
+    Gmail quotes a copy as "On <date>, <name> via acme.test, <alice@acme.test>
+    wrote:", which in the relayed reply tells the original sender that
+    their own message came from alice. It becomes "<name> <their address>".
+    Any quoting prefix a client put between the parts is kept.
+    """
+    alias = route.local_address
+    domain = alias.rsplit("@", 1)[-1]
+    lt, gt = (r"(?:<|&lt;)", r"(?:>|&gt;)")
+    pattern = re.compile(
+        rf" via {re.escape(domain)},?([\s>]*){lt}\s*(?:<a\b[^>]*>)?\s*"
+        rf"{re.escape(alias)}\s*(?:</a>)?\s*{gt}",
+        re.IGNORECASE,
+    )
+    original = route.original_from
+    replacement = rf"\1&lt;{original}&gt;" if html else rf"\1<{original}>"
+    return pattern, replacement
+
+
+def _unwrap_bodies(message: Message, route: ReplyRoute) -> None:
+    token_address = reply_address(route.token, route.local_address.rsplit("@", 1)[-1])
     token = re.compile(re.escape(token_address), re.IGNORECASE)
+    alias_address = route.local_address
     for part in message.walk():
         if part.is_multipart() or part.get_filename():
             continue
@@ -339,10 +380,10 @@ def _unwrap_bodies(message: Message, *, token_address: str, alias_address: str) 
             content = part.get_content()
         except (KeyError, LookupError):  # an unknown charset: leave it be
             continue
-        stripped = (
-            strip_card_text(content) if content_type == "text/plain"
-            else strip_card_html(content)
-        )
+        is_html = content_type == "text/html"
+        stripped = strip_card_html(content) if is_html else strip_card_text(content)
+        pattern, replacement = _attribution(route, html=is_html)
+        stripped = pattern.sub(replacement, stripped)
         stripped = token.sub(alias_address, stripped)
         if stripped != content:
             part.set_content(stripped, subtype=content_type.split("/")[1])
@@ -353,16 +394,30 @@ def strip_card_text(text: str) -> str:
     lines = text.splitlines(keepends=True)
 
     def bare(line: str) -> str:
-        return _QUOTE_PREFIX.sub("", line).strip()
+        # "> " quoting, and the *bold* a client makes of HTML <b>.
+        return _QUOTE_PREFIX.sub("", line).strip().strip("*").strip()
 
-    start = next((i for i, line in enumerate(lines) if bare(line) == FORWARD_MARKER), None)
+    starts = (FORWARD_MARKER, *_LEGACY_STARTS)
+    ends = (REPLY_HINT, *_LEGACY_ENDS)
+    start = next((i for i, line in enumerate(lines) if bare(line) in starts), None)
     if start is None:
         return text
     end = next(
-        (j for j in range(start + 1, len(lines)) if bare(lines[j]) == ORIGINAL_MARKER), None
+        (j for j in range(start + 1, len(lines)) if bare(lines[j]).startswith(ends)), None
     )
     if end is None:
         return text
+    # A quoted-text client can wrap the legacy "answer <name>." line; take
+    # its tail with it.
+    if (
+        not bare(lines[end]).endswith(".")
+        and end + 1 < len(lines)
+        and bare(lines[end + 1]).endswith(".")
+    ):
+        end += 1
+    # And the blank quoted line the card left behind.
+    if end + 1 < len(lines) and not bare(lines[end + 1]):
+        end += 1
     return "".join(lines[:start] + lines[end + 1:])
 
 
@@ -501,7 +556,7 @@ __all__ = [
     "FORWARD_ID_TAG",
     "FORWARD_MARKER",
     "HTML_MARKER",
-    "ORIGINAL_MARKER",
+    "REPLY_HINT",
     "REPLY_PREFIX",
     "RETENTION",
     "ReplyRoute",
