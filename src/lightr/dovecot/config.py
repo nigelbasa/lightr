@@ -107,6 +107,7 @@ def dovecot_conf(cfg: Config, lua_path: Path | None = None) -> str:
         f"file:{sieve_dir}/%d/%n/scripts;active={sieve_dir}/%d/%n/active.sieve"
     )
     spam_script = spam_script_path(cfg).as_posix()
+    first_valid_uid = mail_user_uid()
 
     master_user_block = ""
     master_separator = ""
@@ -146,9 +147,10 @@ protocols = imap lmtp
 #
 mail_location = maildir:~/Maildir
 mail_home = {maildir}/%d/%n
-mail_uid = lightr
-mail_gid = lightr
-first_valid_uid = 1000
+mail_uid = {MAIL_USER}
+mail_gid = {MAIL_USER}
+# The mail user's own uid: it is a system account, numbered below 1000.
+first_valid_uid = {first_valid_uid}
 
 namespace inbox {{
   inbox = yes
@@ -336,6 +338,39 @@ _HOSTNAME = re.compile(
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
     r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
 )
+
+
+#: The system account that owns every Maildir and runs LMTP delivery.
+MAIL_USER = "lightr"
+
+#: Used where the mail user does not exist when the configuration is
+#: generated -- a developer's machine. Debian numbers system accounts
+#: from 100.
+SYSTEM_UID_FLOOR = 100
+
+
+def mail_user_uid() -> int:
+    """The lowest uid Dovecot may use for mail: the mail user's own.
+
+    This was hard-coded as 1000. The package creates `lightr` as a
+    system account, which Debian and Ubuntu number below 1000 (998 on
+    the server it was found on), so Dovecot refused every delivery and
+    every IMAP login: "Mail access for users with UID 998 not
+    permitted". Nothing in the test suite runs a real Dovecot, so it
+    surfaced only when sievec was run against the generated config.
+
+    The account's real uid is also the tightest value that works:
+    nothing numbered below it -- root, other daemons -- can be used
+    for mail access.
+    """
+    try:
+        import pwd
+    except ImportError:  # Windows
+        return SYSTEM_UID_FLOOR
+    try:
+        return pwd.getpwnam(MAIL_USER).pw_uid
+    except KeyError:
+        return SYSTEM_UID_FLOOR
 
 
 def _present(*paths: Path | None) -> bool:

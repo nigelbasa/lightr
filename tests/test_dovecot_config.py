@@ -544,3 +544,56 @@ class TestIMAPCertificates:
         assert configured.tls.cert_file is not None
         assert not configured.tls.cert_file.exists()
         assert "ssl_cert = <" not in dovecot_conf(configured)
+
+
+class TestMailUserUid:
+    """first_valid_uid was 1000; the lightr system account is 998, and
+    Dovecot refused every delivery and IMAP login because of it."""
+
+    def _setting(self, conf: str) -> int:
+        (line,) = [
+            s.strip() for s in conf.splitlines()
+            if s.strip().startswith("first_valid_uid")
+        ]
+        return int(line.split("=", 1)[1])
+
+    def test_the_floor_is_the_mail_users_own_uid(
+        self, configured: Config, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from lightr.dovecot import config as dovecot_config
+
+        monkeypatch.setattr(dovecot_config, "mail_user_uid", lambda: 998)
+
+        assert self._setting(dovecot_conf(configured)) == 998
+
+    def test_a_system_account_uid_is_looked_up(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import sys
+        import types
+
+        from lightr.dovecot.config import mail_user_uid
+
+        fake = types.ModuleType("pwd")
+        fake.getpwnam = lambda name: types.SimpleNamespace(pw_uid=998)  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "pwd", fake)
+
+        assert mail_user_uid() == 998
+
+    def test_without_the_user_it_falls_back_below_system_accounts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import sys
+        import types
+
+        from lightr.dovecot.config import SYSTEM_UID_FLOOR, mail_user_uid
+
+        def missing(name: str):
+            raise KeyError(name)
+
+        fake = types.ModuleType("pwd")
+        fake.getpwnam = missing  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "pwd", fake)
+
+        assert mail_user_uid() == SYSTEM_UID_FLOOR
+        assert SYSTEM_UID_FLOOR < 1000
