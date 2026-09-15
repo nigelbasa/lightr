@@ -65,8 +65,10 @@ def install(
         yes=yes,
         detail=(
             f"[yellow]This writes into {manager.conf_dir} and replaces Lightr's "
-            "own generated files. Anything already there is backed up first."
-            "[/yellow]"
+            "own generated files. It also comments out `!include "
+            "auth-system.conf.ext` in conf.d/10-auth.conf, if present, so "
+            "logins are not tried against PAM first. Anything already there "
+            "is backed up first.[/yellow]"
         ),
     )
 

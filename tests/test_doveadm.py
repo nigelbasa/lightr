@@ -34,6 +34,9 @@ class FakeDoveadm(Doveadm):
         self.output = output
         self.fail = fail
         self.calls: list[tuple[tuple[str, ...], bytes | None]] = []
+        # version() asks dovecot itself rather than going through run(),
+        # so without this a test host with Dovecot installed would run it.
+        self.version_commands = [(sys.executable, "-c", "print('2.3.16 (7e2e900c1a)')")]
 
     @property
     def available(self) -> bool:
