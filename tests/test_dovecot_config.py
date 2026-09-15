@@ -137,7 +137,7 @@ class TestGeneratedFiles:
         files = generate(configured)
         names = {f.path.name for f in files}
         assert names == {
-            CONF_NAME, "lightr-checkpassword", "lightr-userdb.conf.ext"
+            CONF_NAME, "lightr-checkpassword", "lightr-userdb.conf.ext", "spam.sieve"
         }
 
     def test_the_checkpassword_script_is_executable_and_restricted(
@@ -369,3 +369,77 @@ def _install_into(cfg: Config, conf_dir: Path) -> None:
         target = conf_dir / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(item.content, encoding="utf-8")
+
+
+class TestSpamFiling:
+    """Flagged mail has to go somewhere. It used to be scored, flagged,
+    and delivered to the inbox of any mailbox without its own rule."""
+
+    def test_the_spam_script_is_generated_under_sieve_dir(
+        self, configured: Config
+    ) -> None:
+        from lightr.dovecot.config import spam_script_path
+
+        files = {f.path: f for f in generate(configured)}
+        script = files[spam_script_path(configured)]
+
+        assert script.path.is_relative_to(configured.dovecot.sieve_dir)
+        assert '"X-Lightr-Spam-Action"' in script.content
+        assert 'fileinto :create "Junk";' in script.content
+        assert "stop;" in script.content
+
+    def test_dovecot_runs_it_before_each_mailbox_script(
+        self, configured: Config
+    ) -> None:
+        from lightr.dovecot.config import spam_script_path
+
+        plugin = dovecot_conf(configured).split("plugin {", 1)[1].split("}", 1)[0]
+        assert f"sieve_before = {spam_script_path(configured).as_posix()}" in plugin
+
+    def test_the_action_header_cannot_be_forged(self) -> None:
+        from lightr.mail.headers import CONTROLLED_HEADERS
+
+        assert "X-Lightr-Spam-Action" in CONTROLLED_HEADERS
+
+
+class TestSpamScriptCompilation:
+    """Precompiling with sievec, run here through the Python interpreter
+    so the tests do not need Pigeonhole installed."""
+
+    def _manager(self, configured: Config, tmp_path: Path, code: str):
+        import sys
+
+        from lightr.dovecot.manage import DovecotManager
+
+        manager = DovecotManager(configured, conf_dir=tmp_path)
+        manager.sievec_command = [sys.executable, "-c", code]
+        return manager
+
+    async def test_a_script_that_compiles_raises_no_warning(
+        self, configured: Config, tmp_path: Path
+    ) -> None:
+        manager = self._manager(configured, tmp_path, "import sys; sys.exit(0)")
+        assert await manager.compile_spam_script() is None
+
+    async def test_a_script_that_does_not_compile_is_a_warning_not_a_failure(
+        self, configured: Config, tmp_path: Path
+    ) -> None:
+        manager = self._manager(
+            configured, tmp_path,
+            "import sys; sys.stderr.write('line 3: unknown extension'); sys.exit(1)",
+        )
+
+        warning = await manager.compile_spam_script()
+
+        assert warning is not None
+        assert "unknown extension" in warning
+        assert "inbox" in warning
+
+    async def test_no_sievec_means_nothing_to_do(
+        self, configured: Config, tmp_path: Path
+    ) -> None:
+        from lightr.dovecot.manage import DovecotManager
+
+        manager = DovecotManager(configured, conf_dir=tmp_path)
+        manager.sievec_command = None
+        assert await manager.compile_spam_script() is None

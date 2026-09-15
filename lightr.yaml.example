@@ -58,7 +58,8 @@ database:
 
 # spam:
 #   enabled: true
-#   # Score at which a message is filed as Junk rather than delivered.
+#   # Score at which a message is flagged as spam and filed into Junk
+#   # (or only flagged, for a domain created with --spam-policy tag).
 #   junk_threshold: 4.0
 #   # A running rspamd. When it answers, its verdict replaces Lightr's
 #   # own scoring, blocklists included; when it is down, Lightr scores.

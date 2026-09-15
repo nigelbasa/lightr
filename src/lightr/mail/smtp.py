@@ -452,20 +452,69 @@ class LightrHandler:
         mailboxes = list(
             dict.fromkeys([r.mailbox for r in local if r.mailbox] + extra_mailboxes)
         )
-        try:
-            result = await self.lmtp.deliver(mail_from, mailboxes, message)
-        except LMTPError as exc:
-            log.error("LMTP delivery failed: %s", exc)
-            outcome.error = "Mail store temporarily unavailable"
-            return outcome
+        from lightr.dovecot.sieve import HEADER_SPAM_ACTION
 
-        outcome.delivered.extend(result.delivered)
-        for status in result.failed:
-            log.warning("LMTP refused %s: %s %s", status.recipient,
-                        status.code, status.message)
+        # One LMTP transaction per spam action: the header is on the
+        # message, and a message to two domains with different policies
+        # needs two different copies. Almost always this is one group.
+        for action, group in (await self._spam_actions(mailboxes, analysis)).items():
+            del message[HEADER_SPAM_ACTION]
+            if action:
+                message[HEADER_SPAM_ACTION] = action
+            try:
+                result = await self.lmtp.deliver(mail_from, group, message)
+            except LMTPError as exc:
+                # A 4xx after an earlier group landed means the sender
+                # retries and that group gets a second copy. A duplicate
+                # is recoverable; silently losing the rest is not.
+                log.error("LMTP delivery failed: %s", exc)
+                outcome.error = "Mail store temporarily unavailable"
+                return outcome
+
+            outcome.delivered.extend(result.delivered)
+            for status in result.failed:
+                log.warning("LMTP refused %s: %s %s", status.recipient,
+                            status.code, status.message)
 
         self._notify(outcome, mail_from=mail_from, message=message)
         return outcome
+
+    async def _spam_actions(
+        self, mailboxes: list[str], analysis: header_tools.Analysis
+    ) -> dict[str, list[str]]:
+        """Mailboxes grouped by what their domain does with spam.
+
+        The key is the value for the spam-action header, "" for none.
+        Clean mail is one group with no action. Spam to a domain whose
+        policy is `junk` -- the default -- is marked for the server-wide
+        Sieve script to file into Junk; `tag` delivers to the inbox
+        with the spam headers only.
+
+        `reject` is not honoured at SMTP time and files into Junk like
+        `junk`: refusing would turn every false positive into a bounce
+        the recipient never sees, and that has not been asked for.
+        """
+        from lightr.dovecot.sieve import SPAM_ACTION_JUNK
+        from lightr.models import SpamPolicy
+        from lightr.repo import DomainRepo
+
+        if not analysis.is_spam:
+            return {"": mailboxes}
+
+        policies: dict[str, SpamPolicy] = {}
+        groups: dict[str, list[str]] = {}
+        async with self.engine.begin() as conn:
+            repo = DomainRepo(conn)
+            for mailbox in mailboxes:
+                name = mailbox.rsplit("@", 1)[-1].lower()
+                if name not in policies:
+                    try:
+                        policies[name] = (await repo.resolve(name)).spam_policy
+                    except LookupError:
+                        policies[name] = SpamPolicy.JUNK
+                action = "" if policies[name] is SpamPolicy.TAG else SPAM_ACTION_JUNK
+                groups.setdefault(action, []).append(mailbox)
+        return groups
 
     def _notify(
         self, outcome: DeliveryOutcome, *, mail_from: str, message: Message

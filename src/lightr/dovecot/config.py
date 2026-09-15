@@ -105,6 +105,7 @@ def dovecot_conf(cfg: Config, lua_path: Path | None = None) -> str:
     sieve_setting = (
         f"file:{sieve_dir}/%d/%n/scripts;active={sieve_dir}/%d/%n/active.sieve"
     )
+    spam_script = spam_script_path(cfg).as_posix()
 
     master_user_block = ""
     master_separator = ""
@@ -269,6 +270,9 @@ protocol lmtp {{
 
 plugin {{
   sieve = {sieve_setting}
+  # Runs before each mailbox's own script: mail Lightr marked as spam
+  # for a domain whose policy is junk goes to Junk, and stops there.
+  sieve_before = {spam_script}
   sieve_extensions = +relational +comparator-i;ascii-numeric +imap4flags +mailbox +body
 
   quota = maildir:User quota
@@ -320,7 +324,49 @@ def generate(cfg: Config, *, api_base_url: str | None = None) -> list[GeneratedF
             mode=0o640,
             group=DOVECOT_GROUP,
         ),
+        GeneratedFile(path=spam_script_path(cfg), content=spam_script()),
     ]
+
+
+#: The server-wide spam script, under sieve_dir. There rather than in
+#: /etc/dovecot because LMTP runs as the mail user and writes the
+#: compiled form next to the script; a directory it cannot write means
+#: recompiling on every delivery. `_global` cannot collide with a
+#: mailbox's directory: domain names cannot contain an underscore
+#: at the start and always contain a dot.
+SPAM_SCRIPT = Path("_global") / "spam.sieve"
+
+
+def spam_script_path(cfg: Config) -> Path:
+    return cfg.dovecot.sieve_dir / SPAM_SCRIPT
+
+
+def spam_script() -> str:
+    """File mail marked for Junk into Junk.
+
+    Compiled by the same generator as mailbox filter rules, so its
+    syntax is the syntax already tested there.
+    """
+    from lightr.dovecot.sieve import (
+        HEADER_SPAM_ACTION,
+        SPAM_ACTION_JUNK,
+        Action,
+        Condition,
+        Field,
+        Operator,
+        Rule,
+        compile_script,
+    )
+
+    rule = Rule(
+        name="File spam into Junk",
+        conditions=[
+            Condition(Field.HEADER, Operator.EQUALS, SPAM_ACTION_JUNK,
+                      header=HEADER_SPAM_ACTION)
+        ],
+        actions=[(Action.FILE_INTO, "Junk"), (Action.STOP, "")],
+    )
+    return compile_script([rule]).render()
 
 
 def _default_api_url(cfg: Config) -> str:

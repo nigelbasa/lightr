@@ -8,8 +8,9 @@ the same way for the sender's domain and for the domains a message
 links to.
 
 A listing is evidence, not a verdict. It adds points to the score --
-enough that a listed address plus one other signal files mail as Junk,
-not so many that one list junks mail on its own. Refusing mail outright
+enough that a listed address plus one other signal flags mail as spam
+(``X-Spam-Flag: YES``, and Junk under the default spam policy), not so
+many that one list flags it on its own. Refusing mail outright
 because of a list is a different decision with a different cost, and
 this module does not make it.
 

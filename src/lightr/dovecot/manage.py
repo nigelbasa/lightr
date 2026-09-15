@@ -127,6 +127,10 @@ class DovecotManager:
         self.cfg = cfg
         self.conf_dir = conf_dir
         self.doveadm = doveadm if doveadm is not None else Doveadm()
+        #: How to precompile a Sieve script. A list so tests can run
+        #: something other than Pigeonhole's sievec.
+        sievec = shutil.which("sievec")
+        self.sievec_command: list[str] | None = [sievec] if sievec else None
 
     # -- the whole job ----------------------------------------------------
 
@@ -250,6 +254,9 @@ class DovecotManager:
                 f"changed:\n{problem}"
             )
 
+        if (warning := await self.compile_spam_script()) is not None:
+            report.warnings.append(warning)
+
         if reload:
             try:
                 await self.doveadm.reload()
@@ -261,6 +268,45 @@ class DovecotManager:
                 )
 
         return report
+
+    async def compile_spam_script(self) -> str | None:
+        """Precompile the server-wide spam script. A warning, or None.
+
+        LMTP runs as the mail user and would compile the script on
+        delivery, but it cannot save the compiled form into a directory
+        root created here -- so it would recompile, and log that it
+        could not save, on every message. Compiling at install time
+        also catches a script Dovecot would refuse, while someone is
+        watching.
+
+        Not fatal: a script that does not compile means spam reaches
+        the inbox, which is how things were before it existed.
+        """
+        import asyncio
+
+        if self.sievec_command is None:
+            return None
+        path = self._retarget(dovecot_config.spam_script_path(self.cfg))
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *self.sievec_command, str(path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
+        except TimeoutError:
+            process.kill()
+            return "sievec did not finish compiling the spam filing script"
+        except OSError as exc:
+            return f"could not run sievec on the spam filing script: {exc}"
+
+        if process.returncode != 0:
+            detail = stderr.decode("utf-8", errors="replace").strip()
+            return (
+                f"the spam filing script at {path} did not compile, so spam will "
+                f"be delivered to the inbox: {detail or 'no output'}"
+            )
+        return None
 
     def drift(self) -> list[str]:
         """Names of generated files that no longer match this config.

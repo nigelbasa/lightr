@@ -26,6 +26,10 @@ HEADER_SPAM_SCORE = "X-Spam-Score"
 HEADER_SPAM_FLAG = "X-Spam-Flag"
 HEADER_AUTH_RESULTS = "Authentication-Results"
 HEADER_HAS_ATTACHMENT = "X-Lightr-Has-Attachment"
+#: What delivery wants done with spam, per its domain's spam policy.
+#: The server-wide script files mail carrying "junk" into Junk.
+HEADER_SPAM_ACTION = "X-Lightr-Spam-Action"
+SPAM_ACTION_JUNK = "junk"
 
 
 class Field(StrEnum):

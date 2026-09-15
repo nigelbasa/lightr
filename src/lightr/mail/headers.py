@@ -23,15 +23,19 @@ from email.utils import format_datetime, make_msgid
 from lightr.dovecot.sieve import (
     HEADER_AUTH_RESULTS,
     HEADER_HAS_ATTACHMENT,
+    HEADER_SPAM_ACTION,
     HEADER_SPAM_FLAG,
     HEADER_SPAM_SCORE,
 )
 
 #: Every header Lightr controls. Stripped from inbound mail before the
-#: engine writes its own, so an external sender cannot forge them.
+#: engine writes its own, so an external sender cannot forge them --
+#: including the spam action, which a spammer would otherwise set to
+#: nothing, or a prankster to "junk" on someone's real mail.
 CONTROLLED_HEADERS = (
     HEADER_SPAM_SCORE,
     HEADER_SPAM_FLAG,
+    HEADER_SPAM_ACTION,
     HEADER_HAS_ATTACHMENT,
     HEADER_AUTH_RESULTS,
     "X-Lightr-Spam-Reasons",

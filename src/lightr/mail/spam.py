@@ -66,9 +66,9 @@ SUSPICIOUS_ATTACHMENT = 2.0
 MANY_RECIPIENTS = 0.5
 EMPTY_BODY = 0.7
 
-#: Reputation lists. One listed address is not enough to junk mail on
-#: its own (under the default 4.0); a listing plus a failed check, or
-#: two lists agreeing, is. Capped so a dozen lists naming the same
+#: Reputation lists. One listed address is not enough to flag mail as
+#: spam on its own (under the default 4.0); a listing plus a failed
+#: check, or two lists agreeing, is. Capped so a dozen lists naming the same
 #: sender count as strong evidence, not as a dozen times it.
 BLOCKLISTED_ADDRESS = 3.0
 BLOCKLISTED_DOMAIN = 2.5
