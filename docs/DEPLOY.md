@@ -340,9 +340,25 @@ server {
 
     location / {
         proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
         # Lightr trusts the *last* entry, so a client cannot forge it.
         proxy_set_header X-Forwarded-For $remote_addr;
+        # The live-updates socket, /v1/mailbox/events. Without these it
+        # is refused at the proxy, and the API looks fine otherwise.
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $lightr_connection_upgrade;
+        # A socket with nothing happening sends a heartbeat every 30s;
+        # the default 60s read timeout would still close a quiet one.
+        proxy_read_timeout 1h;
     }
+}
+
+# Beside the server block: "upgrade" only when the client asked for it,
+# or every ordinary request carries a Connection: upgrade it did not ask
+# for.
+map $http_upgrade $lightr_connection_upgrade {
+    default upgrade;
+    ''      close;
 }
 ```
 

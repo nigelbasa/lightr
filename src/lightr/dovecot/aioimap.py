@@ -12,8 +12,10 @@ omits a field.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
+from collections.abc import AsyncIterator
 from email.utils import parsedate_to_datetime
 from typing import Any
 
@@ -27,6 +29,11 @@ from lightr.dovecot.mailbox import (
 log = logging.getLogger("lightr.imap")
 
 DEFAULT_TIMEOUT = 30
+
+#: How often an IDLE is re-entered. Under the 29 minutes RFC 2177 tells
+#: a client to stay inside one, and under Dovecot's own imap_idle_notify
+#: interval, so a dropped connection is noticed rather than waited on.
+IDLE_REFRESH = 600.0
 
 # LIST response: (\HasNoChildren \Sent) "/" "Sent"
 _LIST_LINE = re.compile(
@@ -190,6 +197,39 @@ class AioIMAPClient:
             raise MailboxError(f"no such folder: {folder}")
         self._selected = folder
         return await self.select_status(folder)
+
+    async def idle(
+        self, folder: str, *, timeout: float = IDLE_REFRESH
+    ) -> AsyncIterator[list[str]]:
+        """Yield Dovecot's untagged pushes for a folder, as they arrive.
+
+        IDLE is how a client hears about mail without polling. The
+        connection is re-entered every ``timeout`` seconds because a
+        server is entitled to drop an IDLE that has run too long -- the
+        RFC says 29 minutes -- and because a refresh proves the socket is
+        still alive.
+
+        The caller ends it by closing the generator (leaving the ``async
+        for``, or cancelling the task); the IDLE is stopped and the
+        connection is left usable.
+        """
+        client = await self._ensure_selected(folder)
+        try:
+            while True:
+                await client.idle_start(timeout=timeout)
+                try:
+                    lines = _as_lines(await client.wait_server_push(timeout=timeout))
+                except TimeoutError:
+                    lines = []
+                finally:
+                    if client.has_pending_idle():
+                        client.idle_done()
+                if lines:
+                    yield lines
+        finally:
+            with contextlib.suppress(Exception):
+                if client.has_pending_idle():
+                    client.idle_done()
 
     async def _ensure_selected(self, folder: str) -> Any:
         client = await self._connect()

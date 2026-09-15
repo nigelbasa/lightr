@@ -119,6 +119,45 @@ should store both.
 INBOX, Sent, Drafts, Trash, Junk and Archive cannot be renamed or
 deleted. Lightr files mail into them by name.
 
+### Live updates
+
+`wss://mail.example.com/v1/mailbox/events` pushes what IMAP's `IDLE`
+pushes, as JSON. One socket watches one folder, INBOX until told
+otherwise, and a mailbox may hold five at once.
+
+Authenticate with `Authorization: Bearer <token>` where the client can
+set headers. A browser cannot, so the first message may carry the token
+instead -- within ten seconds, and never in the query string, which ends
+up in the proxy's access log:
+
+```json
+{"token": "..."}
+```
+
+The server then sends:
+
+```json
+{"type": "ready", "mailbox": "you@example.com", "folder": "INBOX",
+ "folders": [{"name": "INBOX", "messages": 12, "unseen": 3, "uidvalidity": 1}]}
+
+{"type": "update", "folder": "INBOX",
+ "new": [{"uid": 41, "subject": "...", "from": "...", "seen": false}],
+ "changed": [{"uid": 38, "seen": true}],
+ "removed": [37],
+ "status": {"name": "INBOX", "messages": 13, "unseen": 4, "uidvalidity": 1}}
+
+{"type": "heartbeat"}
+```
+
+`changed` carries a message whose flags changed; `removed` carries UIDs
+that left the watched window of the newest 50 messages. Send
+`{"type": "watch", "folder": "Sent"}` to follow another folder (a fresh
+`ready` follows), `{"type": "refresh"}` to ask for the current state, and
+`{"type": "ping"}` for a `{"type": "pong"}`.
+
+Close codes: `4401` the token was missing, wrong or expired, `4403` the
+key does not open a mailbox, `4429` too many sockets for this mailbox.
+
 ### Writing and sending
 
 Both endpoints below take a message as JSON:
@@ -218,5 +257,5 @@ Worth knowing before designing around any of these:
 | ManageSieve (:4190) | Filters are managed through the API. A script uploaded some other way is overwritten the next time the rules change. |
 | Autoconfig / Autodiscover | Clients do not discover settings on their own. Enter them by hand, or serve the XML from your web server. |
 | JMAP, CalDAV, CardDAV | Mail only. |
-| Push to the API | No stream for API clients. IMAP `IDLE` works, and the `mail.received` webhook exists for organization-level integrations. |
+| Push to the API | `/v1/mailbox/events` (below). The `mail.received` webhook also exists, for organization-level integrations. |
 | Changing a password over the API | `lightr account passwd`, or the organization's identity provider for external accounts. |

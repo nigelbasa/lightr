@@ -20,10 +20,12 @@ from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-from starlette.routing import Route
+from starlette.routing import Route, WebSocketRoute
 
 from lightr import __version__
 from lightr.api.auth import AuthError, Principal, authenticate, client_ip
+from lightr.api.events import PATH as EVENTS_PATH
+from lightr.api.events import events
 from lightr.api.filters import FILTER_ROUTES
 from lightr.api.internal import INTERNAL_PATHS, INTERNAL_ROUTES
 from lightr.api.mailbox import MAILBOX_ROUTES
@@ -859,6 +861,7 @@ ROUTES: list[Route] = [
     Route("/v1/webhooks/{id}/deliveries", list_webhook_deliveries, methods=["GET"]),
 ]
 
+ROUTES.append(WebSocketRoute(EVENTS_PATH, events))
 ROUTES.extend(SESSION_ROUTES)
 ROUTES.extend(MAILBOX_ROUTES)
 ROUTES.extend(FILTER_ROUTES)

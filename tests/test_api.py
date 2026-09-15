@@ -350,8 +350,17 @@ class TestRouteTable:
     def test_every_route_is_registered_once(self) -> None:
         from lightr.api.app import ROUTES
 
-        seen = [(r.path, tuple(sorted(r.methods or ()))) for r in ROUTES]
+        # A WebSocketRoute has no `methods`; it is one path, one handler.
+        seen = [
+            (r.path, tuple(sorted(getattr(r, "methods", None) or ()))) for r in ROUTES
+        ]
         assert len(seen) == len(set(seen))
+
+    def test_the_live_updates_socket_is_registered(self) -> None:
+        from lightr.api.app import ROUTES
+        from lightr.api.events import PATH
+
+        assert PATH in [r.path for r in ROUTES if not getattr(r, "methods", None)]
 
     async def test_unknown_path_is_404(
         self, client: httpx.AsyncClient, world: dict
