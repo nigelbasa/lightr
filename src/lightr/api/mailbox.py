@@ -497,6 +497,99 @@ async def send_message(request: Request) -> Response:
     )
 
 
+#: Where a mailbox's own key may forward it. An operator's alias can go
+#: wider; self-service is kept to what a person forwards to.
+MAX_FORWARD_DESTINATIONS = 10
+
+
+async def _own_alias(request: Request, account: Account) -> Any:
+    """The alias with this mailbox's own address, if there is one."""
+    from lightr.repo import AliasRepo, NotFoundError
+
+    try:
+        return await AliasRepo(request.state.conn).resolve(
+            account.local_part, domain_id=account.domain_id
+        )
+    except NotFoundError:
+        return None
+
+
+def _forwarding_view(alias: Any) -> dict[str, Any]:
+    from lightr.models import AliasType
+
+    active = alias is not None and alias.is_active and alias.type is AliasType.BRIDGE
+    return {
+        "enabled": active,
+        "destinations": list(alias.destinations) if active else [],
+        # Always true: a forward that dropped the local copy would make
+        # this mailbox stop receiving, and routing ignores a plain
+        # forward with a mailbox's own name for exactly that reason.
+        "keeps_copy": True,
+        # Replies from a destination go back to the original sender
+        # from this address, not from the destination's.
+        "replies_routed": True,
+    }
+
+
+async def get_forwarding(request: Request) -> Response:
+    account = await _account_for(request)
+    return _json(_forwarding_view(await _own_alias(request, account)))
+
+
+async def set_forwarding(request: Request) -> Response:
+    """Forward this mailbox's mail, keeping a copy.
+
+    Stored as a bridge alias on the mailbox's own address -- the same
+    thing an operator would create -- so routing, the rewritten
+    envelope sender, the spam check and reply routing all apply.
+    """
+    from lightr.api.app import _destinations, parse_body
+    from lightr.models import Alias, AliasType
+    from lightr.repo import AliasRepo
+
+    account = await _account_for(request)
+    body = await parse_body(request)
+    unknown = set(body) - {"destinations"}
+    if unknown:
+        raise AuthError(400, f"unknown field(s): {', '.join(sorted(unknown))}")
+
+    destinations = _destinations(body.get("destinations"))
+    if len(destinations) > MAX_FORWARD_DESTINATIONS:
+        raise AuthError(
+            400, f"a mailbox can forward to at most {MAX_FORWARD_DESTINATIONS} addresses"
+        )
+    if account.email and account.email.lower() in destinations:
+        raise AuthError(400, "a mailbox cannot forward to itself")
+
+    repo = AliasRepo(request.state.conn)
+    alias = await _own_alias(request, account)
+    if alias is None:
+        alias = await repo.create(
+            Alias(
+                domain_id=account.domain_id,
+                source=account.local_part,
+                destinations=destinations,
+                type=AliasType.BRIDGE,
+            )
+        )
+    else:
+        alias.destinations = destinations
+        alias.type = AliasType.BRIDGE
+        alias.is_active = True
+        await repo.update(alias)
+    return _json(_forwarding_view(alias))
+
+
+async def stop_forwarding(request: Request) -> Response:
+    from lightr.repo import AliasRepo
+
+    account = await _account_for(request)
+    alias = await _own_alias(request, account)
+    if alias is not None:
+        await AliasRepo(request.state.conn).delete(alias.id)
+    return Response(status_code=204)
+
+
 def _submission(request: Request) -> Any:
     """One submission handler per app, created on first send."""
     from lightr.mail.smtp import LightrHandler
@@ -671,6 +764,9 @@ MAILBOX_ROUTES: list[Route] = [
     Route("/v1/mailbox/folders/{name:path}", delete_folder, methods=["DELETE"]),
     Route("/v1/mailbox/drafts", save_draft, methods=["POST"]),
     Route("/v1/mailbox/send", send_message, methods=["POST"]),
+    Route("/v1/mailbox/forwarding", get_forwarding, methods=["GET"]),
+    Route("/v1/mailbox/forwarding", set_forwarding, methods=["PUT"]),
+    Route("/v1/mailbox/forwarding", stop_forwarding, methods=["DELETE"]),
     Route("/v1/mailbox/messages", list_messages, methods=["GET"]),
     Route("/v1/mailbox/messages/bulk", bulk_messages, methods=["POST"]),
     Route("/v1/mailbox/messages/{id}", get_message, methods=["GET"]),
