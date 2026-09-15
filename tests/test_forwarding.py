@@ -150,6 +150,31 @@ class TestForwardsAreActuallySent:
         queued = [a for q in await _queued(engine) for a in q.to_addrs]
         assert outcome.forwarded == queued
 
+    async def test_a_forward_leaves_without_our_analysis(
+        self, receive: LightrHandler, engine: AsyncEngine
+    ) -> None:
+        """A forwarded copy reached Gmail carrying X-Spam-Score,
+        X-Lightr-Has-Attachment and our Authentication-Results. The local
+        copy of a bridge keeps them; the copy that leaves must not."""
+        raw = _with_attachment().replace(
+            b"Subject:", b"X-Spam-Score: -10.0\r\nSubject:", 1
+        )
+        await receive.deliver(
+            mail_from="sender@example.test", recipients=["both@acme.test"], raw=raw,
+        )
+
+        (queued,) = await _queued(engine)
+        assert queued.raw is not None
+        sent = message_from_bytes(queued.raw)
+        for name in header_tools.CONTROLLED_HEADERS:
+            assert name not in sent, name
+        assert sent["Received"] is not None
+
+        lmtp: RecordingLMTP = receive.lmtp  # type: ignore[assignment]
+        (_, _, local_payload) = lmtp.calls[0]
+        local = message_from_bytes(local_payload)
+        assert local[header_tools.HEADER_AUTH_RESULTS] is not None
+
 
 class TestTheMessageLeavesWhole:
     async def test_attachments_survive_forwarding(

@@ -411,8 +411,10 @@ class LightrHandler:
             *outbound,
             *(r.recipient for r in replies),
         ]
-        outgoing = message
+        # The analysis is for our own mailboxes; _queue takes it off
+        # anything that leaves the server.
         if targets:
+            header_tools.apply(message, analysis, self.cfg.server.hostname)
             header_tools.ensure_message_id(message, self.cfg.server.hostname)
             header_tools.ensure_date(message)
             header_tools.add_received(
@@ -422,18 +424,9 @@ class LightrHandler:
                 helo=helo,
                 recipient=targets[0],
             )
-            # The analysis is for our own mailboxes. Stamped on submitted
-            # mail it went out to the world: Gmail received X-Spam-Score,
-            # X-Lightr-Has-Attachment and an Authentication-Results saying
-            # dkim=none from us. The copy is taken after the Message-ID and
-            # Received line, so both copies still share them.
-            if outbound:
-                outgoing = message_from_bytes(message.as_bytes(), policy=SMTP_POLICY)
-                header_tools.strip_controlled(outgoing)
-            header_tools.apply(message, analysis, self.cfg.server.hostname)
 
         if outbound:
-            if await self._enqueue_outbound(mail_from, outbound, outgoing):
+            if await self._enqueue_outbound(mail_from, outbound, message):
                 outcome.forwarded.extend(outbound)
             else:
                 outcome.error = "Cannot send as that address from this server"
@@ -653,6 +646,14 @@ class LightrHandler:
         except Exception:  # pragma: no cover - malformed MIME
             text = ""
 
+        # Everything leaving the server passes through here -- submitted
+        # mail, alias forwards, relayed replies -- so this is where our
+        # analysis comes off. Stamped for our own mailboxes, it went out
+        # to Gmail as X-Spam-Score, X-Lightr-Has-Attachment and an
+        # Authentication-Results from us, on sent and forwarded mail alike.
+        wire = message_from_bytes(message.as_bytes(), policy=SMTP_POLICY)
+        header_tools.strip_controlled(wire)
+
         await Queue(conn).enqueue(
             org_id=domain.org_id,
             domain_id=domain.id,
@@ -660,7 +661,7 @@ class LightrHandler:
             to_addrs=recipients,
             subject=str(message.get("Subject", "") or ""),
             body=text,
-            raw=message.as_bytes(),
+            raw=wire.as_bytes(),
             envelope_from=envelope_from,
         )
 
