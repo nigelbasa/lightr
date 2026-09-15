@@ -138,13 +138,19 @@ alias_reply_routes = Table(
     metadata,
     Column("token", Text, primary_key=True),
     Column("alias_id", UUID, nullable=False),
-    Column("account_id", UUID, nullable=False),
+    # Nullable: a plain forward has no mailbox of its own, and its token
+    # exists only so the forward's envelope sender is on our domain.
+    Column("account_id", UUID),
+    Column("domain_id", UUID),
     Column("local_address", Text, nullable=False),
     Column("bridge_destinations", Text, nullable=False),
     Column("original_from", Text, nullable=False),
     Column("original_to", Text),
     Column("original_cc", Text),
+    # bridge: replies are relayed. forward: only bounces come back.
+    Column("kind", Text, nullable=False, server_default="bridge"),
     _created_at(),
+    Index("idx_alias_reply_routes_created", "created_at"),
 )
 
 # --------------------------------------------------------------------

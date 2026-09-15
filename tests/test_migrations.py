@@ -108,6 +108,53 @@ class TestAdoptingAGoDatabase:
         tables = _tables(go_db.database.path)
         assert {"messages", "encryption_keys"} <= tables
 
+    def test_reply_routes_survive_the_table_rebuild(self, go_db: Config) -> None:
+        """0007 relaxes `account_id` to nullable, which SQLite can only
+        do by rebuilding the table. A rebuild that ran without error
+        but lost the Go engine's tokens would break every reply to a
+        message bridged before the upgrade -- and nothing else here
+        would notice."""
+        assert go_db.database.path is not None
+        token = "a" * 24
+        conn = sqlite3.connect(go_db.database.path)
+        try:
+            conn.execute(
+                "INSERT INTO alias_reply_routes (token, alias_id, account_id, "
+                "local_address, bridge_destinations, original_from, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (token, str(uuid4()), str(uuid4()), "alice@acme.test",
+                 '["alice@example.net"]', "customer@example.org",
+                 datetime.now(UTC).isoformat()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        migrate.upgrade(go_db)
+
+        columns = _columns(go_db.database.path, "alias_reply_routes")
+        assert {"domain_id", "kind"} <= columns
+        conn = sqlite3.connect(go_db.database.path)
+        try:
+            row = conn.execute(
+                "SELECT local_address, kind FROM alias_reply_routes WHERE token = ?",
+                (token,),
+            ).fetchone()
+            assert row == ("alice@acme.test", "bridge")
+
+            # A plain forward's token has no mailbox. Before 0007 this
+            # insert failed on the NOT NULL the Go engine declared.
+            conn.execute(
+                "INSERT INTO alias_reply_routes (token, alias_id, account_id, "
+                "local_address, bridge_destinations, original_from, kind, created_at) "
+                "VALUES (?, ?, NULL, ?, ?, ?, 'forward', ?)",
+                ("b" * 24, str(uuid4()), "info@acme.test", '["x@example.net"]',
+                 "customer@example.org", datetime.now(UTC).isoformat()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     def test_engine_can_use_the_migrated_database(self, go_db: Config) -> None:
         migrate.upgrade(go_db)
 
@@ -204,9 +251,9 @@ class TestRetiredTables:
         assert cfg.database.path is not None
         assert not ({"messages", "encryption_keys"} & _tables(cfg.database.path))
 
-    def test_head_is_0006(self, cfg: Config) -> None:
+    def test_head_is_0007(self, cfg: Config) -> None:
         migrate.upgrade(cfg)
-        assert migrate.current_revision(cfg) == migrate.head_revision(cfg) == "0006"
+        assert migrate.current_revision(cfg) == migrate.head_revision(cfg) == "0007"
 
     def test_downgrade_recreates_them_empty(self, go_db: Config) -> None:
         """Reversible in structure only -- the contents are gone, and

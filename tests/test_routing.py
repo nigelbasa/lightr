@@ -165,13 +165,21 @@ class TestAliases:
         route = await router.route("both@acme.test")
         assert route.forward_to == ["ops@acme.test"]
 
-    async def test_a_real_mailbox_beats_an_alias(
+    async def test_a_bridge_with_an_accounts_name_mirrors_into_it(
         self, router: Router, world: dict
     ) -> None:
         """'bridged' is both an account and a bridge alias; the bridge
-        applies, and it mirrors into that account."""
+        applies, and it mirrors into that account.
+
+        This asserted LOCAL -- the opposite of its own docstring. A
+        bridge always shares its name with the mailbox it mirrors into,
+        so returning LOCAL whenever an account existed meant no bridge
+        could ever fire, and this test pinned that in place. A plain
+        forward alias with an account's name is still ignored; see
+        tests/test_replies.py."""
         route = await router.route("bridged@acme.test")
-        assert route.disposition is Disposition.LOCAL
+        assert route.disposition is Disposition.ALIAS_BRIDGE
+        assert route.mailbox == "bridged@acme.test"
 
 
 class TestAliasLoops:
@@ -222,11 +230,13 @@ class TestBridgeAliases:
     async def test_bridge_keeps_a_local_copy_and_forwards(
         self, router: Router, world: dict, conn: AsyncConnection
     ) -> None:
-        # Remove the same-named account so the alias is reached, then
-        # re-add it under a different local part to act as the mailbox.
         route = await router.route("bridged@acme.test")
-        # With an account present, the account wins (tested above).
-        assert route.disposition is Disposition.LOCAL
+
+        assert route.disposition is Disposition.ALIAS_BRIDGE
+        assert route.delivers_locally
+        assert route.mailbox == "bridged@acme.test"
+        assert route.forward_to == ["you@gmail.test"]
+        assert route.alias_id is not None
 
     async def test_bridge_without_a_mailbox_degrades_to_forward(
         self, router: Router, world: dict, conn: AsyncConnection

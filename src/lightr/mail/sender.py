@@ -30,6 +30,9 @@ log = logging.getLogger("lightr.sender")
 #: How long to wait when the queue is empty before looking again.
 IDLE_INTERVAL = 10.0
 
+#: How often expired reply tokens are removed.
+SWEEP_INTERVAL = 3600.0
+
 #: Sending failures that are not an SMTP status. Treated as transient:
 #: a DNS blip or a connection reset is not the recipient's fault.
 TRANSIENT_CODE = 451
@@ -53,12 +56,22 @@ class Sender:
     async def run(self) -> None:
         """Drain the queue until stopped."""
         log.info("outbound sender started")
+        last_sweep = 0.0
         while not self._stopping.is_set():
             try:
                 sent = await self.drain_once()
             except Exception:
                 log.exception("sender iteration failed")
                 sent = 0
+
+            # Expired reply tokens. Here rather than on a separate timer
+            # because this loop already runs for the life of the server,
+            # and the only other thing that cleaned tables was an
+            # operator remembering a command.
+            now = asyncio.get_running_loop().time()
+            if now - last_sweep >= SWEEP_INTERVAL:
+                last_sweep = now
+                await self.sweep()
 
             if sent == 0:
                 # Nothing to do; wait, but wake immediately on stop.
@@ -70,6 +83,20 @@ class Sender:
 
     def stop(self) -> None:
         self._stopping.set()
+
+    async def sweep(self) -> int:
+        """Remove expired reply tokens. Never raises."""
+        from lightr.mail.replies import ReplyRouteRepo
+
+        try:
+            async with self.engine.begin() as conn:
+                removed = await ReplyRouteRepo(conn).sweep()
+        except Exception:
+            log.exception("could not sweep expired reply tokens")
+            return 0
+        if removed:
+            log.info("removed %d expired reply token(s)", removed)
+        return removed
 
     async def drain_once(self, limit: int = 10) -> int:
         """Claim and attempt a batch. Returns how many were attempted."""

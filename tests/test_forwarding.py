@@ -28,6 +28,7 @@ from lightr.config import Config
 from lightr.dovecot.lmtp import DeliveryResult, RecipientStatus
 from lightr.mail import headers as header_tools
 from lightr.mail.queue import Queue, QueuedMessage, QueueStatus
+from lightr.mail.routing import Disposition, Route
 from lightr.mail.sender import Sender
 from lightr.mail.smtp import MAX_HOPS, DeliveryOutcome, LightrHandler
 from lightr.models import Account, Alias, Domain, Organization
@@ -231,9 +232,13 @@ class TestWhatIsNotForwarded:
         message = message_from_bytes(_with_attachment())
         outcome = DeliveryOutcome()
 
+        route = Route(
+            recipient="both@acme.test",
+            disposition=Disposition.ALIAS_FORWARD,
+            domain_id=world["domain"].id,
+        )
         local = await receive._forward(
-            [(world["domain"].id, "someone@external.test"),
-             (world["domain"].id, "ops@acme.test")],
+            [(route, "someone@external.test"), (route, "ops@acme.test")],
             mail_from="sender@example.test",
             message=message,
             analysis=header_tools.Analysis(is_spam=True, score=9.0),

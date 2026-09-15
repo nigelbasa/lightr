@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
@@ -39,6 +40,10 @@ class Disposition(StrEnum):
     LOCAL = "local"
     ALIAS_FORWARD = "alias_forward"
     ALIAS_BRIDGE = "alias_bridge"
+    #: Addressed to a reply token: a reply to a bridged copy, or a
+    #: bounce of something Lightr forwarded. What happens depends on
+    #: who sent it, which routing does not know -- deliver decides.
+    REPLY = "reply"
     REJECT = "reject"
 
 
@@ -86,6 +91,9 @@ class Route:
     mailbox: str | None = None  # the address to hand to LMTP
     forward_to: list[str] = field(default_factory=list)
     reason: RejectReason | None = None
+    alias_id: UUID | None = None
+    #: The stored reply route, for Disposition.REPLY.
+    reply: Any = None
 
     @property
     def rejected(self) -> bool:
@@ -123,6 +131,18 @@ class Router:
             return Route(recipient, Disposition.REJECT,
                          reason=RejectReason.NOT_LOCAL_DOMAIN)
 
+        # A reply token is on one of our domains but is neither an
+        # account nor an alias. An unknown or expired token falls
+        # through and is refused like any address that does not exist.
+        from lightr.mail.replies import ReplyRouteRepo, token_from
+
+        if (token := token_from(local_part)) is not None:
+            reply = await ReplyRouteRepo(self._conn).get(token)
+            if reply is not None:
+                return Route(
+                    recipient, Disposition.REPLY, domain_id=domain.id, reply=reply
+                )
+
         # A real mailbox wins over an alias of the same name: an
         # operator who creates both almost certainly means the mailbox.
         account = await self._accounts.find(address)
@@ -135,6 +155,32 @@ class Router:
             if not account.can_receive:
                 return Route(recipient, Disposition.REJECT, domain_id=domain.id,
                              reason=RejectReason.RECEIVING_BLOCKED)
+
+            # Except a bridge. A bridge mirrors *into* the mailbox of the
+            # same name, so it always shares its name with an account --
+            # and returning LOCAL here first meant no bridge could ever
+            # fire. A plain forward alias with an account's name is still
+            # ignored: the mailbox wins.
+            bridge = await self._aliases.lookup(domain.id, local_part)
+            if bridge is not None and bridge.type is AliasType.BRIDGE:
+                try:
+                    destinations = await self._expand(
+                        bridge.destinations, seen=frozenset({address})
+                    )
+                except _AliasLoopError:
+                    return Route(recipient, Disposition.REJECT, domain_id=domain.id,
+                                 reason=RejectReason.ALIAS_LOOP)
+                if destinations:
+                    return Route(
+                        recipient,
+                        Disposition.ALIAS_BRIDGE,
+                        account_id=account.id,
+                        domain_id=domain.id,
+                        mailbox=address,
+                        forward_to=destinations,
+                        alias_id=bridge.id,
+                    )
+
             return Route(
                 recipient,
                 Disposition.LOCAL,
@@ -171,6 +217,7 @@ class Router:
                     domain_id=domain.id,
                     mailbox=owner[1],
                     forward_to=destinations,
+                    alias_id=alias.id,
                 )
 
         return Route(
@@ -178,6 +225,7 @@ class Router:
             Disposition.ALIAS_FORWARD,
             domain_id=domain.id,
             forward_to=destinations,
+            alias_id=alias.id,
         )
 
     async def route_all(self, recipients: list[str]) -> list[Route]:

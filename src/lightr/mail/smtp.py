@@ -31,7 +31,7 @@ from lightr.auth import Authenticator
 from lightr.config import Config
 from lightr.dovecot.lmtp import LMTPClient, LMTPError
 from lightr.mail import headers as header_tools
-from lightr.mail.routing import RejectReason, Route, Router
+from lightr.mail.routing import Disposition, RejectReason, Route, Router
 from lightr.ratelimit import limiter
 
 log = logging.getLogger("lightr.smtp")
@@ -50,6 +50,10 @@ class DeliveryOutcome:
     delivered: list[str] = field(default_factory=list)
     forwarded: list[str] = field(default_factory=list)
     rejected: list[tuple[str, RejectReason]] = field(default_factory=list)
+    #: Taken and deliberately not delivered -- a bounce of a plain
+    #: forward, which has nobody local to give it to. Still a 250: the
+    #: bounce was received, and refusing it would bounce the bounce.
+    accepted: list[str] = field(default_factory=list)
     error: str | None = None
     #: Whether ``error`` is final. A retry will not un-loop a loop or
     #: make a domain ours, and a 4xx would have the client retry for days.
@@ -71,7 +75,7 @@ class DeliveryOutcome:
             if self.permanent:
                 return f"554 5.7.1 {self.error}"
             return f"451 4.3.0 {self.error}"
-        if self.delivered or self.forwarded:
+        if self.delivered or self.forwarded or self.accepted:
             return "250 2.0.0 OK"
         if self.rejected:
             _, reason = self.rejected[0]
@@ -376,7 +380,8 @@ class LightrHandler:
 
         local: list[Route] = []
         outbound: list[str] = []
-        forwards: list[tuple[Any, str]] = []  # (alias domain id, destination)
+        forwards: list[tuple[Route, str]] = []  # (the alias's route, destination)
+        replies: list[Route] = []
         for route in routes:
             if route.rejected:
                 # On submission the sender has proved who they are, so
@@ -390,26 +395,32 @@ class LightrHandler:
                 assert route.reason is not None
                 outcome.rejected.append((route.recipient, route.reason))
                 continue
+            if route.disposition is Disposition.REPLY:
+                replies.append(route)
+                continue
             if route.delivers_locally:
                 local.append(route)
-            forwards.extend((route.domain_id, d) for d in route.forward_to)
+            forwards.extend((route, d) for d in route.forward_to)
 
         # Stamp the message once, before any copy of it leaves: the
         # local delivery and every forward carry the same analysis and
         # the same Received line.
-        if local or forwards or outbound:
+        targets = [
+            *(r.mailbox or r.recipient for r in local),
+            *(d for _, d in forwards),
+            *outbound,
+            *(r.recipient for r in replies),
+        ]
+        if targets:
             header_tools.apply(message, analysis, self.cfg.server.hostname)
             header_tools.ensure_message_id(message, self.cfg.server.hostname)
             header_tools.ensure_date(message)
-            first = local[0] if local else None
             header_tools.add_received(
                 message,
                 hostname=self.cfg.server.hostname,
                 remote_ip=remote_ip or "unknown",
                 helo=helo,
-                recipient=(first.mailbox or first.recipient) if first else (
-                    forwards[0][1] if forwards else outbound[0]
-                ),
+                recipient=targets[0],
             )
 
         if outbound:
@@ -423,6 +434,11 @@ class LightrHandler:
         if forwards:
             extra_mailboxes = await self._forward(
                 forwards, mail_from=mail_from, message=message,
+                analysis=analysis, outcome=outcome,
+            )
+        if replies:
+            extra_mailboxes += await self._relay_replies(
+                replies, mail_from=mail_from, message=message,
                 analysis=analysis, outcome=outcome,
             )
 
@@ -592,7 +608,7 @@ class LightrHandler:
 
     async def _forward(
         self,
-        forwards: list[tuple[Any, str]],
+        forwards: list[tuple[Route, str]],
         *,
         mail_from: str,
         message: Message,
@@ -608,7 +624,10 @@ class LightrHandler:
 
         A destination on a domain we host goes straight to Dovecot; one
         elsewhere is queued whole, attributed to the alias's domain so
-        it is signed as that domain.
+        it is signed as that domain. Each external copy gets a reply
+        token as its envelope sender, so it passes SPF at the other end
+        and bounces come back here; a bridge copy also gets it as its
+        Reply-To, so the reply can be relayed to the original sender.
 
         Mail already judged to be spam is not forwarded off the server.
         It still lands in the local Junk folder where there is one, but
@@ -616,41 +635,147 @@ class LightrHandler:
         else's junk -- and receivers blocklist forwarders for exactly
         that.
         """
+        from lightr.mail import replies as reply_tools
         from lightr.repo import DomainRepo
 
         local: list[str] = []
-        external: dict[Any, list[str]] = {}
+        # Grouped per alias route: one token per message per alias.
+        external: dict[int, tuple[Route, list[str]]] = {}
 
         async with self.engine.begin() as conn:
             domains = DomainRepo(conn)
-            for domain_id, destination in forwards:
+            for route, destination in forwards:
                 address = destination.strip().lower()
                 target_domain = address.split("@", 1)[1] if "@" in address else ""
                 try:
                     await domains.resolve(target_domain)
                 except LookupError:
-                    external.setdefault(domain_id, []).append(address)
+                    external.setdefault(id(route), (route, []))[1].append(address)
                 else:
                     local.append(address)
 
             if external and analysis.is_spam:
-                skipped = [a for addrs in external.values() for a in addrs]
+                skipped = [a for _, addrs in external.values() for a in addrs]
                 log.info("not forwarding spam off-server to %s", ", ".join(skipped))
                 external = {}
 
-            for domain_id, recipients in external.items():
-                if domain_id is None:  # pragma: no cover - routes always carry one
+            for route, recipients in external.values():
+                if route.domain_id is None or route.alias_id is None:  # pragma: no cover
                     continue
-                domain = await domains.resolve(str(domain_id))
+                domain = await domains.resolve(str(route.domain_id))
+                recipients = list(dict.fromkeys(recipients))
+                bridged = route.disposition is Disposition.ALIAS_BRIDGE
+
+                token = await reply_tools.ReplyRouteRepo(conn).create(
+                    alias_id=route.alias_id,
+                    domain_id=domain.id,
+                    account_id=route.account_id if bridged else None,
+                    local_address=route.mailbox or route.recipient,
+                    destinations=recipients,
+                    original_from=reply_tools.reply_target(message, mail_from),
+                    original_to=str(message.get("To", "") or "") or None,
+                    original_cc=str(message.get("Cc", "") or "") or None,
+                    kind=(
+                        reply_tools.RouteKind.BRIDGE
+                        if bridged
+                        else reply_tools.RouteKind.FORWARD
+                    ),
+                )
+                token_address = token.address(domain.name)
+                copy = (
+                    reply_tools.for_bridge(message, token_address) if bridged else message
+                )
                 await self._queue(
-                    conn, domain, from_addr=mail_from or f"postmaster@{domain.name}",
-                    recipients=list(dict.fromkeys(recipients)), message=message,
+                    conn, domain,
+                    from_addr=mail_from or f"postmaster@{domain.name}",
+                    recipients=recipients, message=copy,
+                    envelope_from=token_address,
                 )
                 outcome.forwarded.extend(recipients)
 
         if external:
             log.info("queued forwards for %s",
-                     ", ".join(a for addrs in external.values() for a in addrs))
+                     ", ".join(a for _, addrs in external.values() for a in addrs))
+        return local
+
+    async def _relay_replies(
+        self,
+        replies: list[Route],
+        *,
+        mail_from: str,
+        message: Message,
+        analysis: header_tools.Analysis,
+        outcome: DeliveryOutcome,
+    ) -> list[str]:
+        """Handle mail addressed to a reply token. Returns local mailboxes.
+
+        Three cases:
+
+        * **A bounce** (null sender) of something we forwarded. For a
+          bridge it goes into the alias's own mailbox, where its owner
+          can see a destination has stopped working. A plain forward
+          has no mailbox, so it is taken and recorded -- the suppression
+          list learned from it at the top of deliver() -- and not
+          delivered anywhere.
+        * **A reply from a bridge destination.** Cleaned of the path
+          through the replier's own provider and sent to the original
+          sender, from the alias address.
+        * **Anything else** -- a stranger who found a token, an
+          autoresponder answering a plain forward's envelope. Refused
+          exactly like an address that does not exist.
+
+        A reply judged to be spam is not relayed. For a bridge it lands
+        in the alias's mailbox instead, where the Junk rules can file it.
+        """
+        from lightr.mail import replies as reply_tools
+        from lightr.repo import DomainRepo
+
+        local: list[str] = []
+        sender = mail_from.strip().lower()
+        from_header = reply_tools.header_address(message)
+
+        async with self.engine.begin() as conn:
+            for route in replies:
+                reply: reply_tools.ReplyRoute = route.reply
+                bridged = reply.kind is reply_tools.RouteKind.BRIDGE
+                has_mailbox = bridged and reply.account_id is not None
+
+                if not sender:
+                    if has_mailbox:
+                        local.append(reply.local_address)
+                    else:
+                        outcome.accepted.append(route.recipient)
+                    continue
+
+                if not bridged or not reply.accepts_reply_from(sender, from_header):
+                    outcome.rejected.append(
+                        (route.recipient, RejectReason.NO_SUCH_MAILBOX)
+                    )
+                    continue
+
+                if analysis.is_spam:
+                    log.info("not relaying a spam reply to %s", reply.original_from)
+                    if has_mailbox:
+                        local.append(reply.local_address)
+                    else:
+                        outcome.accepted.append(route.recipient)
+                    continue
+
+                domains = DomainRepo(conn)
+                domain = await domains.resolve(
+                    str(reply.domain_id) if reply.domain_id else reply.local_address
+                )
+                await self._queue(
+                    conn, domain,
+                    from_addr=reply.local_address,
+                    recipients=[reply.original_from],
+                    message=reply_tools.clean_reply(message, reply),
+                    envelope_from=reply.local_address,
+                )
+                outcome.forwarded.append(reply.original_from)
+                log.info("relayed a bridge reply from %s to %s as %s",
+                         sender, reply.original_from, reply.local_address)
+
         return local
 
     async def record_bounces(self, raw: bytes) -> int:
