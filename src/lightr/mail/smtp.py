@@ -411,8 +411,8 @@ class LightrHandler:
             *outbound,
             *(r.recipient for r in replies),
         ]
+        outgoing = message
         if targets:
-            header_tools.apply(message, analysis, self.cfg.server.hostname)
             header_tools.ensure_message_id(message, self.cfg.server.hostname)
             header_tools.ensure_date(message)
             header_tools.add_received(
@@ -422,9 +422,18 @@ class LightrHandler:
                 helo=helo,
                 recipient=targets[0],
             )
+            # The analysis is for our own mailboxes. Stamped on submitted
+            # mail it went out to the world: Gmail received X-Spam-Score,
+            # X-Lightr-Has-Attachment and an Authentication-Results saying
+            # dkim=none from us. The copy is taken after the Message-ID and
+            # Received line, so both copies still share them.
+            if outbound:
+                outgoing = message_from_bytes(message.as_bytes(), policy=SMTP_POLICY)
+                header_tools.strip_controlled(outgoing)
+            header_tools.apply(message, analysis, self.cfg.server.hostname)
 
         if outbound:
-            if await self._enqueue_outbound(mail_from, outbound, message):
+            if await self._enqueue_outbound(mail_from, outbound, outgoing):
                 outcome.forwarded.extend(outbound)
             else:
                 outcome.error = "Cannot send as that address from this server"

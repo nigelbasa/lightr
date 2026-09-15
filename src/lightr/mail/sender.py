@@ -136,10 +136,28 @@ class Sender:
             return SendResult(False, 550, f"unknown sending domain: {exc}")
 
         payload = self._compose(message, domain)
+        helo = self.helo_name(domain)
 
         if domain.relay_enabled and domain.relay_host:
-            return await self._send_via_relay(message, domain, payload)
-        return await self._send_direct(message, payload)
+            return await self._send_via_relay(message, domain, payload, helo)
+        return await self._send_direct(message, payload, helo)
+
+    def helo_name(self, domain: object) -> str:
+        """The name to greet the remote server with, for this sending domain.
+
+        Left unset, aiosmtplib greets with the machine's own name, which
+        on the VPS was "localhost" -- a greeting receiving servers count
+        against the sender. A host this server holds a certificate for
+        under the sending domain (mail.example.com for example.com) is
+        the most specific honest answer; otherwise the server's name.
+        """
+        name = str(getattr(domain, "name", "") or "").lower().rstrip(".")
+        if name:
+            for host in self.cfg.tls.domain_certs:
+                candidate = host.lower().rstrip(".")
+                if candidate == name or candidate.endswith("." + name):
+                    return candidate
+        return self.cfg.server.hostname
 
     def _compose(self, message: QueuedMessage, domain: object) -> bytes:
         """The wire form, signed if the domain has a DKIM key.
@@ -175,7 +193,7 @@ class Sender:
         return raw
 
     async def _send_via_relay(
-        self, message: QueuedMessage, domain: object, payload: bytes
+        self, message: QueuedMessage, domain: object, payload: bytes, helo: str
     ) -> SendResult:
         """Hand off to a configured smarthost."""
         try:
@@ -197,6 +215,7 @@ class Sender:
                 password=getattr(domain, "relay_password", None) or None,
                 start_tls=bool(getattr(domain, "relay_use_tls", False)),
                 validate_certs=not getattr(domain, "relay_tls_skip_verify", False),
+                local_hostname=helo,
                 timeout=30,
             )
         except Exception as exc:
@@ -204,7 +223,7 @@ class Sender:
         return SendResult(True)
 
     async def _send_direct(
-        self, message: QueuedMessage, payload: bytes
+        self, message: QueuedMessage, payload: bytes, helo: str
     ) -> SendResult:
         """Deliver straight to the recipient's MX."""
         try:
@@ -239,6 +258,7 @@ class Sender:
                         hostname=host,
                         port=25,
                         start_tls=None,  # opportunistic
+                        local_hostname=helo,
                         timeout=30,
                     )
                     last = None

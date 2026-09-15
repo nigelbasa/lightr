@@ -387,6 +387,40 @@ class TestSubmissionRelay:
         assert outcome.delivered == ["team@acme.test"]
         assert outcome.forwarded == ["someone@external.test"]
 
+    async def test_submitted_mail_leaves_without_our_analysis(
+        self, submission: LightrHandler, lmtp: FakeLMTP, engine: AsyncEngine
+    ) -> None:
+        """Gmail received X-Spam-Score, X-Lightr-Has-Attachment and an
+        Authentication-Results saying dkim=none, stamped by us on mail we
+        were sending. The local copy keeps the analysis; the queued copy
+        must not carry it, forged or ours, but keeps the trace headers."""
+        from email import message_from_bytes
+
+        from lightr.mail.headers import CONTROLLED_HEADERS
+        from lightr.mail.queue import Queue
+
+        outcome = await submission.deliver(
+            mail_from="ops@acme.test",
+            recipients=["team@acme.test", "someone@external.test"],
+            raw=_raw(spam_header=True),
+            remote_ip="203.0.113.5",
+            helo="laptop.example.test",
+        )
+        assert outcome.forwarded == ["someone@external.test"]
+
+        async with engine.begin() as conn:
+            (queued,) = await Queue(conn).list()
+        assert queued.raw is not None
+        sent = message_from_bytes(queued.raw)
+        for name in CONTROLLED_HEADERS:
+            assert name not in sent, name
+        assert sent["Received"] and sent["Message-ID"] and sent["Date"]
+
+        (_, _, local_payload) = lmtp.calls[0]
+        local = message_from_bytes(local_payload)
+        assert local[HEADER_SPAM_SCORE] is not None
+        assert local["Message-ID"] == sent["Message-ID"]
+
     async def test_an_unknown_sender_domain_is_not_queued(
         self, submission: LightrHandler, engine: AsyncEngine
     ) -> None:
