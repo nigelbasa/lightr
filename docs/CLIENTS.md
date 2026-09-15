@@ -40,16 +40,45 @@ over IMAP, as with any server. The server does not.
 
 ## The mailbox API
 
-Authenticate with a key scoped to one mailbox:
+### Signing in
+
+A client signs in with the mailbox's own address and password, checked
+the same way IMAP and SMTP check them:
+
+```http
+POST /v1/auth/session
+{"email": "you@example.com", "password": "..."}
+
+201 {"token": "...", "token_type": "Bearer", "expires_at": "2026-10-16T...Z",
+     "session_id": "...", "account": {"email": "you@example.com", "display_name": "You"}}
+```
+
+Send the token as `Authorization: Bearer <token>`. It lasts 30 days,
+reaches this one mailbox and nothing else, and is sent with nothing to
+choose between mailboxes, so it cannot be pointed at another.
+
+| | |
+| --- | --- |
+| `401` | Wrong address or password. The same answer for a mailbox that does not exist or is disabled. |
+| `429` | Too many attempts, from this address or at this mailbox. Honour `Retry-After`. A successful sign-in resets the count. |
+| `503` | The organization's identity provider did not answer. Not a wrong password: try again. |
+
+| Endpoint | |
+| --- | --- |
+| `DELETE /v1/mailbox/session` | Sign out: this token stops working. |
+| `GET /v1/mailbox/sessions` | Devices signed in: created, last used, address, user agent, and which one is `current`. |
+| `DELETE /v1/mailbox/sessions/{id}` | Sign another device out. |
+| `POST /v1/mailbox/password` | `{"current_password", "new_password"}`. Signs every other device out and clears Dovecot's cached login, so the old password stops working over IMAP too. `409` for a mailbox whose password lives with an identity provider. |
+
+An operator can still make a long-lived key for a script or an
+integration, and the mailbox API accepts it the same way:
 
 ```bash
 lightr apikey create --type account --account you@example.com
 ```
 
-Send it as `X-API-Key: <key>` or `Authorization: Bearer <key>`. None of
-these paths take an account, so a key cannot be pointed at a different
-mailbox. Org and admin keys are refused here. Put the API behind a TLS
-proxy ([DEPLOY.md](DEPLOY.md#where-encryption-terminates)).
+Org and admin keys are refused here. Put the API behind a TLS proxy
+([DEPLOY.md](DEPLOY.md#where-encryption-terminates)).
 
 Errors come back as `{"error": "..."}`. A `400` is the request's fault
 (including a folder Dovecot will not accept), a `404` is a missing

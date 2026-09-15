@@ -94,6 +94,18 @@ class Sender:
         except Exception:
             log.exception("could not sweep expired reply tokens")
             return 0
+
+        # Dead API sessions, on the same clock.
+        try:
+            from lightr.api.session import purge_expired
+
+            async with self.engine.begin() as conn:
+                purged = await purge_expired(conn)
+            if purged:
+                log.info("removed %d expired or revoked session(s)", purged)
+        except Exception:
+            log.exception("could not remove expired sessions")
+
         if removed:
             log.info("removed %d expired reply token(s)", removed)
         return removed

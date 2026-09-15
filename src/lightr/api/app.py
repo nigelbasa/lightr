@@ -27,6 +27,7 @@ from lightr.api.auth import AuthError, Principal, authenticate, client_ip
 from lightr.api.filters import FILTER_ROUTES
 from lightr.api.internal import INTERNAL_PATHS, INTERNAL_ROUTES
 from lightr.api.mailbox import MAILBOX_ROUTES
+from lightr.api.session import SESSION_ROUTES, SIGN_IN_PATH
 from lightr.apikeys import APIKeyError, APIKeyRepo, KeyType, Permission
 from lightr.config import Config
 from lightr.db.engine import create_engine, ping
@@ -124,6 +125,11 @@ async def list_orgs(request: Request) -> Response:
 
     if scoped := principal.scoped_org():
         return ok([dump(await repo.resolve(str(scoped)))])
+    if not principal.is_admin:
+        # A domain or account key recorded without an organization.
+        # scoped_org() is None for it just as for an admin, and this
+        # used to list every tenant on the server.
+        return ok([])
     return ok([dump(o) for o in await repo.list()])
 
 
@@ -158,6 +164,18 @@ async def list_domains(request: Request) -> Response:
             raise AuthError(403, "this key is scoped to a different organization")
         return ok([dump(d) for d in await repo.list(org_id=org.id)])
 
+    # Narrowest scope first. Filtering by organization alone let a
+    # domain or account key without one list every domain on the server.
+    if not principal.is_admin:
+        if principal.key.domain_id is not None:
+            return ok([dump(await repo.resolve(str(principal.key.domain_id)))])
+        if principal.key.account_id is not None:
+            account = await AccountRepo(request.state.conn).resolve(
+                str(principal.key.account_id)
+            )
+            return ok([dump(await repo.resolve(str(account.domain_id)))])
+        if principal.scoped_org() is None:
+            return ok([])
     return ok([dump(d) for d in await repo.list(org_id=principal.scoped_org())])
 
 
@@ -841,13 +859,15 @@ ROUTES: list[Route] = [
     Route("/v1/webhooks/{id}/deliveries", list_webhook_deliveries, methods=["GET"]),
 ]
 
+ROUTES.extend(SESSION_ROUTES)
 ROUTES.extend(MAILBOX_ROUTES)
 ROUTES.extend(FILTER_ROUTES)
 ROUTES.extend(INTERNAL_ROUTES)
 
 #: Paths the API-key middleware does not guard. /health is public;
-#: the internal routes carry their own shared-secret check.
-PUBLIC_PATHS = frozenset({"/health"}) | INTERNAL_PATHS
+#: the internal routes carry their own shared-secret check; signing in
+#: is how a client gets a key, and limits its own attempts.
+PUBLIC_PATHS = frozenset({"/health", SIGN_IN_PATH}) | INTERNAL_PATHS
 
 
 def create_app(cfg: Config, engine: AsyncEngine | None = None) -> Starlette:

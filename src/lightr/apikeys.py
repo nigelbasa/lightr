@@ -193,6 +193,7 @@ class APIKeyRepo:
         allowed_ips: list[str] | None = None,
         expires_in_days: int | None = None,
         description: str | None = None,
+        expires_at: datetime | None = None,
     ) -> tuple[APIKey, str]:
         """Create a key. Returns the record and the one-time secret."""
         if key_type is KeyType.ORG and organization_id is None:
@@ -203,8 +204,9 @@ class APIKeyRepo:
             raise APIKeyError("an account-scoped key needs an account")
 
         secret, prefix, digest = generate_secret()
-        expires_at = None
         if expires_in_days is not None:
+            if expires_at is not None:
+                raise APIKeyError("give expires_in_days or expires_at, not both")
             if expires_in_days <= 0:
                 raise APIKeyError("--expires-in must be a positive number of days")
             expires_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(days=expires_in_days)
