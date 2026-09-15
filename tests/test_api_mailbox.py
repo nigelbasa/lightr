@@ -453,3 +453,109 @@ class TestDrafts:
         )
         assert response.status_code == 400
         assert imap.appended == []
+
+
+class TestSending:
+    """Sending through the API is submission by another door, so it
+    must refuse exactly what submission refuses."""
+
+    @pytest.fixture(autouse=True)
+    def no_dns(self, cfg: Config) -> None:
+        cfg.spam.enabled = False
+
+    async def _queued(self, engine: AsyncEngine) -> list:
+        from lightr.mail.queue import Queue
+
+        async with engine.begin() as conn:
+            return await Queue(conn).list()
+
+    async def test_mail_is_queued_and_filed_in_sent(
+        self, client: httpx.AsyncClient, world: dict, engine: AsyncEngine,
+        shared_imap: FakeIMAP,
+    ) -> None:
+        response = await client.post(
+            "/v1/mailbox/send",
+            json={"to": "friend@example.test", "subject": "Hi", "text": "Hello"},
+            headers=auth(world["mailbox_key"]),
+        )
+
+        assert response.status_code == 202, response.text
+        assert response.json()["queued"] == ["friend@example.test"]
+        assert response.json()["saved_to_sent"] is True
+        (queued,) = await self._queued(engine)
+        assert queued.to_addrs == ["friend@example.test"]
+        ((folder, _, flags),) = shared_imap.appended
+        assert folder == "Sent"
+        assert "\\Seen" in flags
+
+    async def test_bcc_goes_out_but_is_not_shown_to_recipients(
+        self, client: httpx.AsyncClient, world: dict, engine: AsyncEngine,
+        shared_imap: FakeIMAP,
+    ) -> None:
+        await client.post(
+            "/v1/mailbox/send",
+            json={"to": "friend@example.test", "bcc": "boss@example.test",
+                  "subject": "Hi", "text": "Hello"},
+            headers=auth(world["mailbox_key"]),
+        )
+
+        (queued,) = await self._queued(engine)
+        assert set(queued.to_addrs) == {"friend@example.test", "boss@example.test"}
+        assert b"boss@example.test" not in queued.raw
+        ((_, sent_copy, _),) = shared_imap.appended
+        assert b"Bcc: boss@example.test" in sent_copy
+
+    async def test_sending_as_someone_else_is_refused(
+        self, client: httpx.AsyncClient, world: dict, engine: AsyncEngine,
+        shared_imap: FakeIMAP,
+    ) -> None:
+        response = await client.post(
+            "/v1/mailbox/send",
+            json={"from": "other@acme.test", "to": "friend@example.test",
+                  "subject": "Forged", "text": "x"},
+            headers=auth(world["mailbox_key"]),
+        )
+
+        assert response.status_code == 403
+        assert await self._queued(engine) == []
+        assert shared_imap.appended == []
+
+    async def test_a_blocked_account_cannot_send(
+        self, client: httpx.AsyncClient, world: dict, engine: AsyncEngine,
+    ) -> None:
+        async with engine.begin() as conn:
+            account = world["ops"]
+            account.can_send = False
+            await AccountRepo(conn).update(account)
+
+        response = await client.post(
+            "/v1/mailbox/send",
+            json={"to": "friend@example.test", "subject": "Hi", "text": "x"},
+            headers=auth(world["mailbox_key"]),
+        )
+
+        assert response.status_code == 403
+        assert "not allowed to send" in response.json()["error"]
+        assert await self._queued(engine) == []
+
+    async def test_a_reply_marks_the_original_answered(
+        self, client: httpx.AsyncClient, world: dict, shared_imap: FakeIMAP,
+    ) -> None:
+        response = await client.post(
+            "/v1/mailbox/send",
+            json={"to": "sender@example.test", "subject": "Re: Second",
+                  "text": "Thanks", "reply_to": {"folder": "INBOX", "uid": 2}},
+            headers=auth(world["mailbox_key"]),
+        )
+
+        assert response.status_code == 202
+        assert "\\Answered" in shared_imap.messages["INBOX"][2][1]
+
+    async def test_a_message_with_no_recipients_is_refused(
+        self, client: httpx.AsyncClient, world: dict,
+    ) -> None:
+        response = await client.post(
+            "/v1/mailbox/send", json={"subject": "Nobody"},
+            headers=auth(world["mailbox_key"]),
+        )
+        assert response.status_code == 400

@@ -12,6 +12,7 @@ disagree about what is in a mailbox.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from typing import Any, TypeVar
@@ -34,6 +35,8 @@ from lightr.models import Account
 from lightr.repo import AccountRepo
 
 T = TypeVar("T")
+
+log = logging.getLogger("lightr.api.mailbox")
 
 
 async def _account_for(request: Request) -> Account:
@@ -368,7 +371,150 @@ async def save_draft(request: Request) -> Response:
     return _json({"folder": DRAFTS, "saved": True, "replaced": replace}, 201)
 
 
+async def send_message(request: Request) -> Response:
+    """Send mail from this mailbox, and file a copy in Sent.
+
+    Goes through exactly the path SMTP submission does -- the same
+    sender check, routing, queue and DKIM signing -- with the key's
+    account standing in for the SMTP login. A second sending path with
+    its own rules is how the forged-sender hole submission used to
+    have would come back.
+
+    `reply_to` (`{"folder", "uid"}`) marks the message being answered,
+    which is what makes a client show the replied arrow.
+    """
+    from email import message_from_bytes
+    from email.utils import getaddresses
+
+    from lightr.api.app import parse_body
+    from lightr.cli.imap_client import _connect
+
+    body = await parse_body(request)
+    account = await _account_for(request)
+    if account.email is None:  # pragma: no cover - resolve always sets it
+        raise AuthError(500, "could not determine the mailbox address")
+
+    reply_to = body.get("reply_to")
+    if reply_to is not None and not (
+        isinstance(reply_to, dict)
+        and isinstance(reply_to.get("uid"), int)
+        and isinstance(reply_to.get("folder", "INBOX"), str)
+    ):
+        raise AuthError(400, 'reply_to must be {"folder": ..., "uid": ...}')
+
+    is_raw = bool(body.get("raw"))
+    raw = compose(account, body, require_recipients=not is_raw)
+    parsed = message_from_bytes(raw)
+
+    if is_raw:
+        recipients = _addresses(body.get("recipients"), "recipients") or [
+            address
+            for _, address in getaddresses(
+                [*parsed.get_all("To", []), *parsed.get_all("Cc", []),
+                 *parsed.get_all("Bcc", [])]
+            )
+            if address
+        ]
+    else:
+        recipients = [
+            *_addresses(body.get("to"), "to"),
+            *_addresses(body.get("cc"), "cc"),
+            *_addresses(body.get("bcc"), "bcc"),
+        ]
+    recipients = list(dict.fromkeys(r.lower() for r in recipients))
+    if not recipients:
+        raise AuthError(400, "give at least one recipient")
+    if len(recipients) > MAX_RECIPIENTS:
+        raise AuthError(400, f"at most {MAX_RECIPIENTS} recipients per message")
+
+    mail_from = body.get("from") or account.email
+    if not isinstance(mail_from, str):
+        raise AuthError(400, "from must be an address")
+
+    # Bcc is kept in the Sent copy -- the sender should see who they
+    # blind-copied -- and removed from what goes out, or every
+    # recipient would see it.
+    wire = raw
+    if parsed.get_all("Bcc"):
+        del parsed["Bcc"]
+        wire = parsed.as_bytes()
+
+    # Release this request's transaction before handing off. It has
+    # already written (the key's last-used time), and on SQLite an open
+    # write blocks the queue insert that delivery makes on its own
+    # connection -- the send would wait out the lock timeout and fail.
+    await request.state.conn.commit()
+
+    outcome = await _submission(request).deliver(
+        mail_from=mail_from,
+        recipients=recipients,
+        raw=wire,
+        remote_ip="api",
+        authenticated_as=account.email,
+    )
+
+    rejected = [
+        {"recipient": recipient, "reason": reason.smtp_message}
+        for recipient, reason in outcome.rejected
+    ]
+    if outcome.error:
+        return _json(
+            {"error": outcome.error, "rejected": rejected},
+            403 if outcome.permanent else 503,
+        )
+    if not (outcome.delivered or outcome.forwarded or outcome.accepted):
+        return _json({"error": "no recipient accepted the message",
+                      "rejected": rejected}, 422)
+
+    saved = True
+    try:
+        client = await _connect(request.app.state.config, account.email)
+        try:
+            mailbox = Mailbox(client)
+            await mailbox.append(SENT, raw, flags=(FLAG_SEEN,))
+            if reply_to is not None:
+                await mailbox.mark(
+                    reply_to.get("folder", "INBOX"), reply_to["uid"], answered=True
+                )
+        finally:
+            await client.logout()
+    except MailboxError:
+        # The mail has gone; failing the request now would have the
+        # client send it again. Say what did not happen instead.
+        log.warning("sent mail for %s but could not file it in Sent",
+                    account.email, exc_info=True)
+        saved = False
+
+    return _json(
+        {
+            "message_id": str(parsed.get("Message-ID", "") or ""),
+            "queued": outcome.forwarded,
+            "delivered": outcome.delivered,
+            "rejected": rejected,
+            "saved_to_sent": saved,
+        },
+        202,
+    )
+
+
+def _submission(request: Request) -> Any:
+    """One submission handler per app, created on first send."""
+    from lightr.mail.smtp import LightrHandler
+
+    state = request.app.state
+    handler = getattr(state, "submission", None)
+    if handler is None:
+        handler = LightrHandler(state.config, state.engine, require_auth=True)
+        state.submission = handler
+    return handler
+
+
 DRAFTS = "Drafts"
+SENT = "Sent"
+
+#: Recipients one API send may address. Submission clients rarely go
+#: past a few dozen; a mailing list belongs somewhere else.
+MAX_RECIPIENTS = 100
 
 #: The largest message the API will compose or accept whole.
 MAX_MESSAGE_BYTES = 25 * 1024 * 1024
@@ -524,6 +670,7 @@ MAILBOX_ROUTES: list[Route] = [
     Route("/v1/mailbox/folders/{name:path}", rename_folder, methods=["PATCH"]),
     Route("/v1/mailbox/folders/{name:path}", delete_folder, methods=["DELETE"]),
     Route("/v1/mailbox/drafts", save_draft, methods=["POST"]),
+    Route("/v1/mailbox/send", send_message, methods=["POST"]),
     Route("/v1/mailbox/messages", list_messages, methods=["GET"]),
     Route("/v1/mailbox/messages/bulk", bulk_messages, methods=["POST"]),
     Route("/v1/mailbox/messages/{id}", get_message, methods=["GET"]),
