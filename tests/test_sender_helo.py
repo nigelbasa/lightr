@@ -57,7 +57,11 @@ class TestGreeting:
         monkeypatch.setattr(Sender, "_mx_hosts", mx_hosts)
 
         message = SimpleNamespace(sender="ops@acme.test", to_addrs=["a@external.test"])
-        domain = SimpleNamespace(name="acme.test", relay_host="smtp.relay.test")
+        domain = SimpleNamespace(
+            name="acme.test", relay_host="smtp.relay.test", relay_port=587,
+            relay_use_tls=True, relay_tls_skip_verify=False,
+            relay_username=None, relay_password=None,
+        )
         helo = sender.helo_name(domain)
 
         assert (await sender._send_direct(message, b"x", helo)).ok  # type: ignore[arg-type]

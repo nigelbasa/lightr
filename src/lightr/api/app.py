@@ -197,6 +197,71 @@ async def get_domain(request: Request) -> Response:
     return ok(dump(domain))
 
 
+#: What PATCH /v1/domains/{id} may change.
+RELAY_FIELDS = frozenset({
+    "relay_enabled", "relay_host", "relay_port", "relay_username",
+    "relay_password", "relay_use_tls", "relay_tls_skip_verify",
+})
+
+
+async def update_domain(request: Request) -> Response:
+    """Change a domain's outbound relay.
+
+    Only an organization-wide or admin key may: the relay receives every
+    message the domain sends, so a key confined to one domain or one
+    account must not be able to point that mail somewhere else.
+    """
+    from lightr.mail import relay as relay_tools
+
+    principal: Principal = request.state.principal
+    principal.require(Permission.WRITE)
+    body = await parse_body(request)
+    conn = request.state.conn
+
+    domain = await DomainRepo(conn).resolve(request.path_params["id"])
+    if not principal.may_reach_domain(domain.id, domain.org_id):
+        raise AuthError(403, "this key cannot reach that domain")
+    if principal.key.domain_id is not None or getattr(principal.key, "account_id", None):
+        raise AuthError(403, "relay settings need an organization or admin key")
+
+    unknown = set(body) - RELAY_FIELDS
+    if unknown:
+        raise AuthError(
+            400,
+            f"cannot change: {', '.join(sorted(unknown))}. "
+            f"Settable: {', '.join(sorted(RELAY_FIELDS))}",
+        )
+    for flag in ("relay_enabled", "relay_use_tls", "relay_tls_skip_verify"):
+        if flag in body and not isinstance(body[flag], bool):
+            raise AuthError(400, f"{flag} must be true or false")
+    for text_field in ("relay_host", "relay_username", "relay_password"):
+        if body.get(text_field) is not None and not isinstance(body[text_field], str):
+            raise AuthError(400, f"{text_field} must be a string or null")
+
+    # null clears a value; an absent field leaves it alone.
+    if "relay_port" in body and body["relay_port"] is None:
+        domain.relay_port = None
+    change = relay_tools.RelayChange(
+        enabled=body.get("relay_enabled"),
+        host="" if "relay_host" in body and body["relay_host"] is None
+        else body.get("relay_host"),
+        port=body.get("relay_port"),
+        username="" if "relay_username" in body and body["relay_username"] is None
+        else body.get("relay_username"),
+        password="" if "relay_password" in body and body["relay_password"] is None
+        else body.get("relay_password"),
+        use_tls=body.get("relay_use_tls"),
+        skip_verify=body.get("relay_tls_skip_verify"),
+    )
+    try:
+        relay_tools.apply(domain, change)
+    except relay_tools.RelayError as exc:
+        raise AuthError(400, str(exc)) from exc
+
+    await DomainRepo(conn).update(domain)
+    return ok(dump(domain))
+
+
 async def delete_domain(request: Request) -> Response:
     principal: Principal = request.state.principal
     principal.require(Permission.WRITE)
@@ -746,6 +811,7 @@ ROUTES: list[Route] = [
     Route("/v1/domains", list_domains, methods=["GET"]),
     Route("/v1/domains", create_domain, methods=["POST"]),
     Route("/v1/domains/{id}", get_domain, methods=["GET"]),
+    Route("/v1/domains/{id}", update_domain, methods=["PATCH"]),
     Route("/v1/domains/{id}", delete_domain, methods=["DELETE"]),
 
     Route("/v1/accounts", list_accounts, methods=["GET"]),

@@ -201,22 +201,19 @@ class Sender:
         except ImportError:  # pragma: no cover - depends on install
             return SendResult(False, TRANSIENT_CODE, "aiosmtplib is not installed")
 
-        host = getattr(domain, "relay_host", "")
-        port = getattr(domain, "relay_port", None) or 587
+        from lightr.mail.relay import connection
+
+        settings = connection(domain)  # type: ignore[arg-type]
+        host, port = settings["hostname"], settings["port"]
 
         try:
             await aiosmtplib.send(
                 payload,
                 sender=message.sender,
                 recipients=message.to_addrs,
-                hostname=host,
-                port=port,
-                username=getattr(domain, "relay_username", None) or None,
-                password=getattr(domain, "relay_password", None) or None,
-                start_tls=bool(getattr(domain, "relay_use_tls", False)),
-                validate_certs=not getattr(domain, "relay_tls_skip_verify", False),
                 local_hostname=helo,
                 timeout=30,
+                **settings,
             )
         except Exception as exc:
             return SendResult(False, _code_from(exc), f"relay {host}:{port}: {exc}")

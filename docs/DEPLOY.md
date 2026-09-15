@@ -314,7 +314,8 @@ interface.
 | SMTP receive (:25) | Lightr, STARTTLS | Opportunistic. It has to be: a sending server that will not do TLS is still delivering you mail. |
 | Submission (:587) | Lightr, STARTTLS | Required. `security.require_tls_for_auth` is on by default and refuses a password in the clear. |
 | IMAP (:143, :993) | Dovecot | Dovecot's own certificate, configured where its certificate always was. |
-| Outbound relay | Lightr, opportunistic | Encrypted where the receiver offers it. |
+| Outbound, direct to MX | Lightr, opportunistic | Encrypted where the receiver offers it. |
+| Outbound, through a relay | Lightr, STARTTLS or TLS | Required whenever a relay password is set; `lightr domain relay` refuses otherwise. See **Sending through a relay**. |
 | **HTTP API (:8080)** | **nothing — put a proxy in front** | Plain HTTP. |
 | Dovecot → Lightr auth | nothing, and it does not cross a network | Loopback only. |
 
@@ -466,6 +467,49 @@ the statistics module.
 If rspamd is down or slow, Lightr logs it and scores the message
 itself, blocklists included. A broken spam filter never means mail
 goes through unchecked.
+
+### Sending through a relay
+
+A server on a small or residential IP, or one whose reverse DNS you
+cannot set, reaches the inbox more reliably by handing its outgoing mail
+to a provider with a good sending reputation (a "smarthost"). Lightr does
+this per domain. Receiving does not change: MX still points here and
+Dovecot still holds the mail. And the message is DKIM-signed here, as the
+domain, before it is handed over, so the recipient sees the domain's own
+signature whatever the provider adds.
+
+```bash
+# The password comes from a prompt (or --password-stdin), never a flag.
+lightr domain relay example.com --host smtp.provider.example --port 587 \
+    --username apikey --password
+
+# Log in without sending anything, and say exactly what the server said.
+lightr domain relay example.com --test
+
+lightr domain relay example.com              # show the settings
+lightr domain relay example.com --disable    # back to direct delivery, settings kept
+lightr domain relay example.com --clear      # forget them
+```
+
+TLS is on by default when a host is set. Port 465 is spoken to with TLS
+from the first byte; other ports negotiate STARTTLS. A relay password is
+never sent without one or the other: the command refuses. An
+organization or admin API key can do the same with
+`PATCH /v1/domains/{id}` and the `relay_*` fields; a key confined to one
+domain or account cannot, because the relay receives everything the
+domain sends.
+
+Then, in the domain's DNS:
+
+- **SPF:** add the provider's include, keeping the server's own address
+  for anything still sent directly, e.g.
+  `v=spf1 ip4:203.0.113.10 include:spf.provider.example ~all`.
+- **The provider's own records.** Most want a DKIM record or a
+  verification TXT of their own. Publish them alongside the domain's
+  Lightr DKIM record, not instead of it.
+
+DMARC passes on the domain's own DKIM signature even when the provider
+rewrites the envelope sender to its own bounce domain.
 
 ---
 

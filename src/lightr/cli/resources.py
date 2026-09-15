@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from typing import Annotated
 
 import typer
@@ -222,6 +223,115 @@ def delete_domain(
 
     run(_run)
     output.success(f"Deleted {found.name}")
+
+
+@domain_app.command("relay")
+def domain_relay(
+    domain: Annotated[str, typer.Argument(help="Domain name or id.")],
+    host: Annotated[
+        str | None, typer.Option("--host", help="Smarthost, e.g. smtp.resend.com")
+    ] = None,
+    port: Annotated[
+        int | None, typer.Option("--port", help="587 or 2525 (STARTTLS), 465 (TLS).")
+    ] = None,
+    username: Annotated[str | None, typer.Option("--username")] = None,
+    password_prompt: Annotated[
+        bool, typer.Option("--password", help="Prompt for the relay password.")
+    ] = False,
+    password_stdin: Annotated[
+        bool, typer.Option("--password-stdin", help="Read the relay password from stdin.")
+    ] = False,
+    tls: Annotated[
+        bool | None,
+        typer.Option("--tls/--no-tls", help="STARTTLS. On by default when a host is set."),
+    ] = None,
+    skip_verify: Annotated[
+        bool | None,
+        typer.Option("--skip-verify/--verify", help="Skip checking the relay's certificate."),
+    ] = None,
+    enable: Annotated[
+        bool | None, typer.Option("--enable/--disable", help="Keep the settings, switch use.")
+    ] = None,
+    clear: Annotated[bool, typer.Option("--clear", help="Remove every relay setting.")] = False,
+    test: Annotated[
+        bool, typer.Option("--test", help="Connect and log in to the relay; send nothing.")
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
+    fmt: Annotated[Format | None, _FORMAT] = None,
+) -> None:
+    """Show or set the smarthost this domain's outgoing mail goes through.
+
+    Receiving is unchanged; mail is still DKIM-signed here as the domain.
+    The password is never a flag -- that would put it in shell history
+    and in `ps` output -- so it comes from a prompt or from stdin.
+    """
+    from lightr.mail import relay as relay_tools
+    from lightr.mail.sender import Sender
+
+    from .context import state
+
+    if password_prompt and password_stdin:
+        raise typer.BadParameter("--password and --password-stdin are mutually exclusive")
+
+    password: str | None = None
+    if password_stdin:
+        password = sys.stdin.readline().rstrip("\n")
+        if not password:
+            raise typer.BadParameter("no password on stdin")
+    elif password_prompt:
+        password = typer.prompt("Relay password", hide_input=True)
+
+    async def _find() -> Domain:
+        async with db() as conn:
+            return await DomainRepo(conn).resolve(domain)
+
+    found = run(_find)
+    changing = clear or any(
+        v is not None for v in (host, port, username, password, tls, skip_verify, enable)
+    )
+
+    if changing:
+        if clear:
+            confirm(f"Remove the relay settings for {found.name}?", yes=yes)
+        effective_port = port if port is not None else found.relay_port
+        if host is not None and tls is None and effective_port != relay_tools.IMPLICIT_TLS_PORT:
+            tls = True
+        if host is not None and enable is None:
+            enable = True
+        change = relay_tools.RelayChange(
+            enabled=enable, host=host, port=port, username=username, password=password,
+            use_tls=tls, skip_verify=skip_verify, clear=clear,
+        )
+        try:
+            relay_tools.apply(found, change)
+        except relay_tools.RelayError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+
+        async def _save() -> None:
+            async with db() as conn:
+                await DomainRepo(conn).update(found)
+
+        run(_save)
+        output.success(f"Relay for {found.name} is {'on' if found.relay_enabled else 'off'}")
+
+    output.detail(relay_tools.view(found), fmt=fmt)
+    if changing and found.relay_enabled:
+        output.info(
+            f"Add the provider to {found.name}'s SPF record and publish any records it "
+            "asks for. Mail is still signed with this domain's own DKIM key."
+        )
+
+    if test:
+        helo = Sender(state.config, engine=None).helo_name(found)  # type: ignore[arg-type]
+
+        async def _test() -> str:
+            return await relay_tools.test_login(found, local_hostname=helo)
+
+        try:
+            output.success(run(_test))
+        except relay_tools.RelayError as exc:
+            output.stderr.print(f"[red]Relay test failed:[/red] {exc}", soft_wrap=True)
+            raise typer.Exit(1) from exc
 
 
 # --------------------------------------------------------------------
