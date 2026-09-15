@@ -65,6 +65,30 @@ class TestStorageSettings:
             assert flag in conf
 
 
+class TestWhatMailClientsNeed:
+    def test_quota_is_reported_over_imap(self, configured: Config) -> None:
+        """Without imap_quota, clients cannot show how full a mailbox
+        is -- the quota plugin enforces it silently."""
+        conf = dovecot_conf(configured)
+        block = conf.split("protocol imap {", 1)[1].split("}", 1)[0]
+        assert "imap_quota" in block
+
+    def test_trash_and_junk_empty_themselves(self, configured: Config) -> None:
+        conf = dovecot_conf(configured)
+        for folder in ("Trash", "Junk"):
+            block = conf.split(f"mailbox {folder} {{", 1)[1].split("}", 1)[0]
+            assert "autoexpunge = 30d" in block, folder
+
+    def test_sent_and_archive_are_never_expunged(self, configured: Config) -> None:
+        conf = dovecot_conf(configured)
+        for folder in ("Sent", "Drafts", "Archive"):
+            block = conf.split(f"mailbox {folder} {{", 1)[1].split("}", 1)[0]
+            assert "autoexpunge" not in block, folder
+
+    def test_the_list_index_is_on(self, configured: Config) -> None:
+        assert "mailbox_list_index = yes" in dovecot_conf(configured)
+
+
 class TestAuthWiring:
     def test_passdb_is_checkpassword(self, configured: Config) -> None:
         """Not Lua: `dovecot.http` does not exist before Dovecot 2.4,

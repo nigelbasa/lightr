@@ -30,6 +30,9 @@ from lightr.dovecot import checkpassword, userdb
 
 CONF_NAME = "99-lightr.conf"
 
+#: How long mail stays in Trash and Junk before Dovecot removes it.
+TRASH_RETENTION = "30d"
+
 #: Dovecot's SQL userdb description.
 USERDB_CONF_PATH = Path("/etc/dovecot/lightr-userdb.conf.ext")
 
@@ -156,13 +159,17 @@ namespace inbox {{
     special_use = \\Drafts
     auto = subscribe
   }}
+  # Trash and Junk empty themselves. Without this they only grow, and
+  # count against the quota, until someone remembers to empty them.
   mailbox Trash {{
     special_use = \\Trash
     auto = subscribe
+    autoexpunge = {TRASH_RETENTION}
   }}
   mailbox Junk {{
     special_use = \\Junk
     auto = subscribe
+    autoexpunge = {TRASH_RETENTION}
   }}
   mailbox Archive {{
     special_use = \\Archive
@@ -193,6 +200,18 @@ auth_cache_ttl = 5 mins
 auth_cache_negative_ttl = 30 secs
 
 mail_plugins = $mail_plugins quota
+
+#
+# What mail clients rely on. imap_quota answers GETQUOTAROOT, which is
+# how Thunderbird, Apple Mail and K-9 show "3.1 GB of 5 GB". The list
+# index keeps LIST and STATUS fast with many folders, and is what
+# autoexpunge uses to find old mail without scanning every message.
+#
+protocol imap {{
+  mail_plugins = $mail_plugins imap_quota
+  mail_max_userip_connections = 20
+}}
+mailbox_list_index = yes
 
 #
 # passdb: an external program, not Lua over HTTP. `dovecot.http` only

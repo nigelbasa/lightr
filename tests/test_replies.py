@@ -31,7 +31,7 @@ from lightr.dovecot.lmtp import DeliveryResult, RecipientStatus
 from lightr.mail import replies
 from lightr.mail.queue import Queue, QueuedMessage
 from lightr.mail.routing import Disposition, Router
-from lightr.mail.smtp import LightrHandler
+from lightr.mail.smtp import DeliveryOutcome, LightrHandler
 from lightr.models import Account, Alias, AliasType, Domain, Organization
 from lightr.repo import AccountRepo, AliasRepo, DomainRepo, OrganizationRepo
 
@@ -253,6 +253,10 @@ class TestARepliesGoesBackToTheOriginalSender:
         parsed = message_from_bytes(reply.raw)
         assert "alice@acme.test" in str(parsed["From"])
         assert str(parsed["To"]) == ORIGINAL_SENDER
+        # Set explicitly, not inherited from from_addr: it is the only
+        # thing marking this row as a relayed reply rather than mail
+        # alice submitted, should the queue ever apply a policy.
+        assert reply.envelope_from == "alice@acme.test"
         assert reply.sender == "alice@acme.test"
 
     async def test_nothing_in_it_reveals_where_alice_reads_mail(
@@ -398,7 +402,7 @@ class TestATokenIsNotAnOpenRelay:
             [route], mail_from=BRIDGE_DESTINATION,
             message=message_from_bytes(_reply_from_bridge(token_address)),
             analysis=header_tools.Analysis(is_spam=True, score=9.0),
-            outcome=__import__("lightr.mail.smtp", fromlist=["x"]).DeliveryOutcome(),
+            outcome=DeliveryOutcome(),
         )
 
         assert await _queued(engine) == []
