@@ -36,6 +36,12 @@ from lightr.ratelimit import limiter
 
 log = logging.getLogger("lightr.smtp")
 
+#: Received headers after which a message is taken to be looping.
+#: RFC 5321 suggests at least 100 as the limit a relay should tolerate;
+#: real paths are under 15, so 30 is generous for mail and small for a
+#: loop that multiplies on every pass.
+MAX_HOPS = 30
+
 
 @dataclass(slots=True)
 class DeliveryOutcome:
@@ -45,6 +51,9 @@ class DeliveryOutcome:
     forwarded: list[str] = field(default_factory=list)
     rejected: list[tuple[str, RejectReason]] = field(default_factory=list)
     error: str | None = None
+    #: Whether ``error`` is final. A retry will not un-loop a loop or
+    #: make a domain ours, and a 4xx would have the client retry for days.
+    permanent: bool = False
 
     @property
     def ok(self) -> bool:
@@ -59,6 +68,8 @@ class DeliveryOutcome:
         make the sender retry and duplicate the copies that worked.
         """
         if self.error:
+            if self.permanent:
+                return f"554 5.7.1 {self.error}"
             return f"451 4.3.0 {self.error}"
         if self.delivered or self.forwarded:
             return "250 2.0.0 OK"
@@ -325,11 +336,24 @@ class LightrHandler:
             recipient_count=len(recipients),
         )
 
+        # A message that has already passed through this many servers is
+        # going round in circles -- two forwards pointing at each other
+        # across two providers, say. Alias expansion catches loops
+        # inside Lightr; only a hop count catches the ones that leave
+        # and come back.
+        if len(message.get_all("Received") or []) >= MAX_HOPS:
+            log.warning("refusing a message with %d Received headers: mail loop",
+                        MAX_HOPS)
+            outcome.error = "Too many hops, possible mail loop"
+            outcome.permanent = True
+            return outcome
+
         async with self.engine.begin() as conn:
             routes = await Router(conn).route_all(recipients)
 
         local: list[Route] = []
         outbound: list[str] = []
+        forwards: list[tuple[Any, str]] = []  # (alias domain id, destination)
         for route in routes:
             if route.rejected:
                 # On submission the sender has proved who they are, so
@@ -342,35 +366,53 @@ class LightrHandler:
                     continue
                 assert route.reason is not None
                 outcome.rejected.append((route.recipient, route.reason))
-            elif route.delivers_locally:
+                continue
+            if route.delivers_locally:
                 local.append(route)
-                outcome.forwarded.extend(route.forward_to)
-            else:
-                outcome.forwarded.extend(route.forward_to)
+            forwards.extend((route.domain_id, d) for d in route.forward_to)
+
+        # Stamp the message once, before any copy of it leaves: the
+        # local delivery and every forward carry the same analysis and
+        # the same Received line.
+        if local or forwards or outbound:
+            header_tools.apply(message, analysis, self.cfg.server.hostname)
+            header_tools.ensure_message_id(message, self.cfg.server.hostname)
+            header_tools.ensure_date(message)
+            first = local[0] if local else None
+            header_tools.add_received(
+                message,
+                hostname=self.cfg.server.hostname,
+                remote_ip=remote_ip or "unknown",
+                helo=helo,
+                recipient=(first.mailbox or first.recipient) if first else (
+                    forwards[0][1] if forwards else outbound[0]
+                ),
+            )
 
         if outbound:
-            await self._enqueue_outbound(mail_from, outbound, message)
-            outcome.forwarded.extend(outbound)
+            if await self._enqueue_outbound(mail_from, outbound, message):
+                outcome.forwarded.extend(outbound)
+            else:
+                outcome.error = "Cannot send as that address from this server"
+                outcome.permanent = True
 
-        if not local:
+        extra_mailboxes: list[str] = []
+        if forwards:
+            extra_mailboxes = await self._forward(
+                forwards, mail_from=mail_from, message=message,
+                analysis=analysis, outcome=outcome,
+            )
+
+        if not local and not extra_mailboxes:
             # Nothing to hand to Dovecot, but the outcome still matters:
             # a message rejected outright is exactly what an operator
             # wants notified, so this path announces too.
             self._notify(outcome, mail_from=mail_from, message=message)
             return outcome
 
-        header_tools.apply(message, analysis, self.cfg.server.hostname)
-        header_tools.ensure_message_id(message, self.cfg.server.hostname)
-        header_tools.ensure_date(message)
-        header_tools.add_received(
-            message,
-            hostname=self.cfg.server.hostname,
-            remote_ip=remote_ip or "unknown",
-            helo=helo,
-            recipient=local[0].mailbox or local[0].recipient,
+        mailboxes = list(
+            dict.fromkeys([r.mailbox for r in local if r.mailbox] + extra_mailboxes)
         )
-
-        mailboxes = [r.mailbox for r in local if r.mailbox]
         try:
             result = await self.lmtp.deliver(mail_from, mailboxes, message)
         except LMTPError as exc:
@@ -418,14 +460,16 @@ class LightrHandler:
 
     async def _enqueue_outbound(
         self, mail_from: str, recipients: list[str], message: Message
-    ) -> None:
-        """Queue mail for delivery to another server.
+    ) -> bool:
+        """Queue submitted mail for delivery to another server.
 
         Queued rather than sent inline: a slow or unreachable remote MTA
         must not hold the submitting client's SMTP session open, and a
         failure should be retried rather than bounced immediately.
+
+        Returns False when it could not be queued. That used to be a log
+        line and a 250 -- the client was told the mail was sent.
         """
-        from lightr.mail.queue import Queue
         from lightr.repo import DomainRepo
 
         sender_domain = mail_from.split("@", 1)[1] if "@" in mail_from else ""
@@ -438,20 +482,106 @@ class LightrHandler:
                     "cannot queue mail from %s: %r is not a domain we host",
                     mail_from, sender_domain,
                 )
-                return
-
-            body = message.get_body(preferencelist=("plain",))
-            text = body.get_content() if body is not None else ""
-
-            await Queue(conn).enqueue(
-                org_id=domain.org_id,
-                domain_id=domain.id,
-                from_addr=mail_from,
-                to_addrs=recipients,
-                subject=str(message.get("Subject", "") or ""),
-                body=text,
+                return False
+            await self._queue(
+                conn, domain, from_addr=mail_from, recipients=recipients,
+                message=message,
             )
         log.info("queued outbound mail from %s to %s", mail_from, ", ".join(recipients))
+        return True
+
+    async def _queue(
+        self,
+        conn: Any,
+        domain: Any,
+        *,
+        from_addr: str,
+        recipients: list[str],
+        message: Message,
+        envelope_from: str | None = None,
+    ) -> None:
+        """Put one message in the outbound queue, whole."""
+        from lightr.mail.queue import Queue
+
+        try:
+            body = message.get_body(preferencelist=("plain",))
+            text = body.get_content() if body is not None else ""
+        except Exception:  # pragma: no cover - malformed MIME
+            text = ""
+
+        await Queue(conn).enqueue(
+            org_id=domain.org_id,
+            domain_id=domain.id,
+            from_addr=from_addr,
+            to_addrs=recipients,
+            subject=str(message.get("Subject", "") or ""),
+            body=text,
+            raw=message.as_bytes(),
+            envelope_from=envelope_from,
+        )
+
+    async def _forward(
+        self,
+        forwards: list[tuple[Any, str]],
+        *,
+        mail_from: str,
+        message: Message,
+        analysis: header_tools.Analysis,
+        outcome: DeliveryOutcome,
+    ) -> list[str]:
+        """Send an alias's copies on. Returns local mailboxes to deliver.
+
+        This was never done. Routing worked out where a forward should
+        go, the outcome recorded it as forwarded, the sender got a 250
+        -- and nothing was queued. Every message to a forwarding alias
+        was accepted and dropped.
+
+        A destination on a domain we host goes straight to Dovecot; one
+        elsewhere is queued whole, attributed to the alias's domain so
+        it is signed as that domain.
+
+        Mail already judged to be spam is not forwarded off the server.
+        It still lands in the local Junk folder where there is one, but
+        relaying it outward spends this server's reputation on someone
+        else's junk -- and receivers blocklist forwarders for exactly
+        that.
+        """
+        from lightr.repo import DomainRepo
+
+        local: list[str] = []
+        external: dict[Any, list[str]] = {}
+
+        async with self.engine.begin() as conn:
+            domains = DomainRepo(conn)
+            for domain_id, destination in forwards:
+                address = destination.strip().lower()
+                target_domain = address.split("@", 1)[1] if "@" in address else ""
+                try:
+                    await domains.resolve(target_domain)
+                except LookupError:
+                    external.setdefault(domain_id, []).append(address)
+                else:
+                    local.append(address)
+
+            if external and analysis.is_spam:
+                skipped = [a for addrs in external.values() for a in addrs]
+                log.info("not forwarding spam off-server to %s", ", ".join(skipped))
+                external = {}
+
+            for domain_id, recipients in external.items():
+                if domain_id is None:  # pragma: no cover - routes always carry one
+                    continue
+                domain = await domains.resolve(str(domain_id))
+                await self._queue(
+                    conn, domain, from_addr=mail_from or f"postmaster@{domain.name}",
+                    recipients=list(dict.fromkeys(recipients)), message=message,
+                )
+                outcome.forwarded.extend(recipients)
+
+        if external:
+            log.info("queued forwards for %s",
+                     ", ".join(a for addrs in external.values() for a in addrs))
+        return local
 
     async def record_bounces(self, raw: bytes) -> int:
         """Parse a bounce and suppress any dead addresses it names.

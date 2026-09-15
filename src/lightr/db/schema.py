@@ -23,6 +23,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     MetaData,
     String,
     Table,
@@ -233,6 +234,16 @@ email_queue = Table(
     Column("body", Text, nullable=False),
     Column("html_body", Text),
     Column("headers", Text),
+    # The message exactly as it should leave, when there is one. Mail
+    # submitted by a client or forwarded from outside already has its
+    # MIME structure, attachments and headers; rebuilding it from
+    # subject and body threw all of that away. Null for messages that
+    # really are just a subject and a body, which still compose.
+    Column("raw", LargeBinary),
+    # The SMTP envelope sender, when it differs from the From header --
+    # a forward rewritten with SRS, so the destination's SPF check sees
+    # a domain that authorises this server.
+    Column("envelope_from", Text),
     Column("status", Text, nullable=False, server_default="pending"),
     Column("attempts", Integer, nullable=False, server_default="0"),
     Column("max_attempts", Integer, nullable=False, server_default="5"),

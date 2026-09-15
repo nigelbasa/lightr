@@ -204,9 +204,9 @@ class TestRetiredTables:
         assert cfg.database.path is not None
         assert not ({"messages", "encryption_keys"} & _tables(cfg.database.path))
 
-    def test_head_is_0004(self, cfg: Config) -> None:
+    def test_head_is_0005(self, cfg: Config) -> None:
         migrate.upgrade(cfg)
-        assert migrate.current_revision(cfg) == migrate.head_revision(cfg) == "0004"
+        assert migrate.current_revision(cfg) == migrate.head_revision(cfg) == "0005"
 
     def test_downgrade_recreates_them_empty(self, go_db: Config) -> None:
         """Reversible in structure only -- the contents are gone, and

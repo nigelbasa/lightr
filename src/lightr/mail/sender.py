@@ -115,14 +115,27 @@ class Sender:
         return await self._send_direct(message, payload)
 
     def _compose(self, message: QueuedMessage, domain: object) -> bytes:
-        """Build the wire form, signed if the domain has a DKIM key."""
-        email = EmailMessage()
-        email["From"] = message.from_addr
-        email["To"] = ", ".join(message.to_addrs)
-        email["Subject"] = message.subject
-        email.set_content(message.body)
+        """The wire form, signed if the domain has a DKIM key.
 
-        raw = email.as_bytes()
+        A message queued whole is sent whole. Rebuilding every message
+        from its subject and plain-text body is what stripped the
+        attachments, the HTML part and the headers from everything a
+        mail client submitted -- the recipient got a text-only copy of
+        what was sent.
+
+        An existing DKIM-Signature on a forwarded message is left in
+        place; ours is prepended. The original may or may not still
+        verify after forwarding, but it is not ours to remove.
+        """
+        if message.raw:
+            raw = message.raw
+        else:
+            email = EmailMessage()
+            email["From"] = message.from_addr
+            email["To"] = ", ".join(message.to_addrs)
+            email["Subject"] = message.subject
+            email.set_content(message.body)
+            raw = email.as_bytes()
 
         private_key = getattr(domain, "dkim_private_key", None)
         if private_key:
@@ -149,7 +162,7 @@ class Sender:
         try:
             await aiosmtplib.send(
                 payload,
-                sender=message.from_addr,
+                sender=message.sender,
                 recipients=message.to_addrs,
                 hostname=host,
                 port=port,
@@ -194,7 +207,7 @@ class Sender:
                 try:
                     await aiosmtplib.send(
                         payload,
-                        sender=message.from_addr,
+                        sender=message.sender,
                         recipients=recipients,
                         hostname=host,
                         port=25,

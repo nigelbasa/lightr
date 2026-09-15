@@ -178,13 +178,23 @@ class TestRejections:
         assert "550" in outcome.smtp_response()
 
     async def test_alias_forwards_without_local_delivery(
-        self, handler: LightrHandler, lmtp: FakeLMTP
+        self, handler: LightrHandler, lmtp: FakeLMTP, engine: AsyncEngine
     ) -> None:
+        """This used to assert only `outcome.forwarded` -- and the
+        outcome said "forwarded" while nothing was queued. Every message
+        to a forwarding alias was accepted and dropped, and this test
+        passed. So it checks the queue, not the report."""
+        from lightr.mail.queue import Queue
+
         outcome = await handler.deliver(
             mail_from="s@example.test", recipients=["out@acme.test"], raw=_raw()
         )
+
         assert outcome.forwarded == ["someone@external.test"]
         assert lmtp.calls == []
+        async with engine.begin() as conn:
+            queued = await Queue(conn).list()
+        assert [q.to_addrs for q in queued] == [["someone@external.test"]]
 
 
 class TestPartialFailure:

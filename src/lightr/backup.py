@@ -118,9 +118,19 @@ def _encode(value: Any) -> Any:
         return value.isoformat()
     if isinstance(value, UUID | Path):
         return str(value)
-    if isinstance(value, bytes):
-        raise BackupError("binary columns are not supported by this format")
+    if isinstance(value, bytes | bytearray | memoryview):
+        # Queued messages are stored whole since migration 0005. This
+        # raised before, which meant the first message sitting in the
+        # queue made every backup fail.
+        import base64
+
+        return {BINARY_MARKER: base64.b64encode(bytes(value)).decode("ascii")}
     return value
+
+
+#: How a binary value is written in the JSON dump. A plain string would
+#: be indistinguishable from text on the way back in.
+BINARY_MARKER = "$base64"
 
 
 def _decode_row(table: Table, row: dict[str, Any]) -> dict[str, Any]:
@@ -136,7 +146,16 @@ def _decode_row(table: Table, row: dict[str, Any]) -> dict[str, Any]:
     decoded: dict[str, Any] = {}
     for name, value in row.items():
         column = table.c[name]
-        if isinstance(column.type, DateTime) and isinstance(value, str) and value:
+        if isinstance(value, dict) and set(value) == {BINARY_MARKER}:
+            import base64
+
+            try:
+                decoded[name] = base64.b64decode(value[BINARY_MARKER], validate=True)
+            except (ValueError, TypeError) as exc:
+                raise BackupError(
+                    f"{table.name}.{name} holds binary data that does not decode"
+                ) from exc
+        elif isinstance(column.type, DateTime) and isinstance(value, str) and value:
             try:
                 decoded[name] = datetime.fromisoformat(value)
             except ValueError as exc:

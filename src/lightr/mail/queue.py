@@ -68,6 +68,13 @@ class QueuedMessage:
     max_attempts: int
     next_retry: datetime
     last_error: str | None = None
+    raw: bytes | None = None
+    envelope_from: str | None = None
+
+    @property
+    def sender(self) -> str:
+        """The SMTP envelope sender: rewritten for a forward, else From."""
+        return self.envelope_from or self.from_addr
 
     @property
     def exhausted(self) -> bool:
@@ -108,8 +115,15 @@ class Queue:
         html_body: str | None = None,
         headers: dict[str, str] | None = None,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        raw: bytes | None = None,
+        envelope_from: str | None = None,
     ) -> UUID:
-        """Add a message. Returns its queue id."""
+        """Add a message. Returns its queue id.
+
+        Pass ``raw`` whenever there is a real message to send -- anything
+        from a mail client, anything forwarded. ``subject`` and ``body``
+        are then only for listing the queue.
+        """
         if not to_addrs:
             raise ValueError("a queued message needs at least one recipient")
 
@@ -126,6 +140,8 @@ class Queue:
                 body=body,
                 html_body=html_body,
                 headers=json.dumps(headers or {}),
+                raw=raw,
+                envelope_from=envelope_from,
                 status=str(QueueStatus.PENDING),
                 attempts=0,
                 max_attempts=max_attempts,
@@ -316,6 +332,8 @@ def _to_model(mapping: Any) -> QueuedMessage:
         max_attempts=int(data.get("max_attempts") or DEFAULT_MAX_ATTEMPTS),
         next_retry=data["next_retry"],
         last_error=data.get("last_error"),
+        raw=bytes(data["raw"]) if data.get("raw") is not None else None,
+        envelope_from=data.get("envelope_from"),
     )
 
 
