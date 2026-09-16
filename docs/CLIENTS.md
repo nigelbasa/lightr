@@ -127,7 +127,7 @@ list needs one request:
   "uid": 41, "uids": [41, 44, 47], "count": 3,
   "folder": "INBOX", "subject": "Invoice 42",
   "participants": ["Billing <billing@example.com>", "You <you@example.com>"],
-  "date": "2026-09-14T11:02:00+00:00",
+  "date": "2026-09-14 11:02:00+00:00",
   "unseen": 1, "flagged": false, "size": 18422,
   "messages": [ ... ]
 }
