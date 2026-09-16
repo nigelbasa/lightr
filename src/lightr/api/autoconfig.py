@@ -58,14 +58,22 @@ def _domain_of(address: str) -> str:
 def _candidates(request: Request, address: str = "") -> list[str]:
     """Domains this request might be asking about, best first.
 
-    The address the client is setting up is the reliable one. The Host
-    header is the fallback, with the prefix the client invented removed:
-    a request to autoconfig.acme.test is about acme.test.
-    """
-    found: list[str] = []
-    if address and (domain := _domain_of(address)):
-        found.append(domain)
+    An address settles it on its own. It is the client saying which
+    mailbox it is configuring, so if this server does not host that
+    domain the answer is "not here" -- falling back to the Host header
+    would hand back a working configuration for *a different domain*,
+    and a client that applied it would send that mailbox's password
+    here. Answering about nigelbasa.tech when asked about example.org
+    is wrong even though every hostname in the reply is true.
 
+    Only when no address is given does the Host header stand in, with
+    the prefix the client invented removed: a request to
+    autoconfig.acme.test is about acme.test.
+    """
+    if address and (domain := _domain_of(address)):
+        return [domain] if "." in domain else []
+
+    found: list[str] = []
     host = request.headers.get("host", "").split(":")[0].strip().lower()
     if host:
         found.append(host)

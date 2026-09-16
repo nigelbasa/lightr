@@ -160,19 +160,32 @@ class TestTheHostHeaderIsAFallback:
 
         assert response.status_code == 200
 
-    async def test_the_address_wins_over_the_host(
+    async def test_an_unhosted_address_is_not_rescued_by_the_host(
         self, client: httpx.AsyncClient, world: dict
     ) -> None:
-        """The address is what is being set up; the host is whatever the
-        client guessed."""
+        """Caught in production, where every request carries a real Host.
+
+        Asking about someone@notours.test on a host we *do* serve used
+        to fall back to that host and return a working configuration for
+        acme.test. Every hostname in it was true and it was still wrong:
+        a client applying it would send notours.test's password here.
+        """
         response = await client.get(
             MOZILLA,
             params={"emailaddress": "someone@notours.test"},
             headers={"Host": "autoconfig.acme.test"},
         )
 
-        assert response.status_code == 200, "falls back rather than refusing"
-        assert "acme.test" in response.text
+        assert response.status_code == 404
+
+    async def test_the_host_still_answers_when_no_address_is_given(
+        self, client: httpx.AsyncClient, world: dict
+    ) -> None:
+        """The fallback is not gone, it is only for when there is
+        nothing better -- which is how Thunderbird's own fetch arrives."""
+        response = await client.get(MOZILLA, headers={"Host": "autoconfig.acme.test"})
+
+        assert response.status_code == 200
 
 
 class TestOutlook:
