@@ -53,6 +53,10 @@ class FakeIMAP:
         self.expunged: list[tuple[str, int]] = []
         self.user_folders: list[str] = []
         self.appended: list[tuple[str, bytes, tuple[str, ...]]] = []
+        #: What THREAD would return per folder. Unset means every
+        #: message is its own conversation, which is what a server
+        #: without THREAD reports.
+        self.thread_groups: dict[str, list[list[int]]] = {}
 
     async def login(self, username: str, password: str) -> None: ...
     async def logout(self) -> None: ...
@@ -96,6 +100,18 @@ class FakeIMAP:
         if "UNSEEN" in criteria:
             uids = [u for u in uids if FLAG_SEEN not in self.messages[folder][u][1]]
         return uids
+
+    async def thread(self, folder: str, criteria: str = "ALL") -> list[list[int]]:
+        """Group as Dovecot does: the criteria filters, the grouping stays."""
+        matched = set(await self.search(folder, criteria))
+        groups = self.thread_groups.get(folder)
+        if groups is None:
+            return [[uid] for uid in sorted(matched)]
+        return [
+            [uid for uid in group if uid in matched]
+            for group in groups
+            if any(uid in matched for uid in group)
+        ]
 
     async def fetch_summaries(self, folder: str, uids: list[int]) -> list[MessageSummary]:
         out = []
@@ -184,6 +200,132 @@ class TestListing:
 
     async def test_empty_folder_returns_empty(self, mailbox: Mailbox) -> None:
         assert await mailbox.list("Trash") == []
+
+
+class TestThreading:
+    """Conversations, as Dovecot's THREAD groups them.
+
+    The property that matters is that the page is a page of *threads*:
+    windowing by message would cut a conversation across two pages, and
+    a client showing the second half of a conversation with no first
+    half looks broken.
+    """
+
+    async def test_without_server_grouping_each_message_stands_alone(
+        self, mailbox: Mailbox
+    ) -> None:
+        """A server with no THREAD renders as the plain list it was."""
+        threads = await mailbox.threads()
+        assert [t.uids for t in threads] == [[3], [2], [1]]
+
+    async def test_grouped_messages_arrive_as_one_thread(
+        self, imap: FakeIMAP, mailbox: Mailbox
+    ) -> None:
+        imap.thread_groups["INBOX"] = [[1, 2], [3]]
+
+        threads = await mailbox.threads()
+        assert [t.uids for t in threads] == [[3], [1, 2]]
+
+    async def test_most_recently_active_first(
+        self, imap: FakeIMAP, mailbox: Mailbox
+    ) -> None:
+        """A conversation's position is its newest message, not its
+        oldest -- a reply brings the whole thread back to the top."""
+        imap.thread_groups["INBOX"] = [[1, 3], [2]]
+
+        assert [t.uids for t in await mailbox.threads()] == [[1, 3], [2]]
+
+    async def test_the_window_counts_threads_not_messages(
+        self, imap: FakeIMAP, mailbox: Mailbox
+    ) -> None:
+        imap.thread_groups["INBOX"] = [[1, 2], [3]]
+
+        page = await mailbox.threads(limit=1)
+        assert [t.uids for t in page] == [[3]]
+
+    async def test_offset_never_splits_a_conversation(
+        self, imap: FakeIMAP, mailbox: Mailbox
+    ) -> None:
+        imap.thread_groups["INBOX"] = [[1, 2], [3]]
+
+        page = await mailbox.threads(limit=1, offset=1)
+        assert [t.uids for t in page] == [[1, 2]]
+
+    async def test_a_filter_narrows_within_a_thread(
+        self, imap: FakeIMAP, mailbox: Mailbox
+    ) -> None:
+        """Message 1 is read; the conversation still appears, with only
+        the unread message in it."""
+        imap.thread_groups["INBOX"] = [[1, 2], [3]]
+
+        threads = await mailbox.threads(criteria=build_search_criteria(unread=True))
+        assert [t.uids for t in threads] == [[3], [2]]
+
+    async def test_an_empty_folder_has_no_threads(self, mailbox: Mailbox) -> None:
+        assert await mailbox.threads("Trash") == []
+
+    async def test_an_offset_past_the_end_is_empty(self, mailbox: Mailbox) -> None:
+        assert await mailbox.threads(offset=99) == []
+
+    async def test_a_message_that_vanished_is_dropped_not_left_as_a_gap(
+        self,
+    ) -> None:
+        """THREAD and FETCH are two round trips; a message can be
+        expunged between them."""
+
+        class Gappy(FakeIMAP):
+            async def thread(self, folder, criteria="ALL"):  # type: ignore[override]
+                return [[1, 99]]
+
+            async def fetch_summaries(self, folder, uids):  # type: ignore[override]
+                present = [u for u in uids if u in self.messages[folder]]
+                return await super().fetch_summaries(folder, present)
+
+        threads = await Mailbox(Gappy()).threads()
+        assert [t.uids for t in threads] == [[1]]
+
+
+class TestThreadSummary:
+    """What a client shows on one row of a threaded inbox."""
+
+    @pytest.fixture
+    def thread(self, imap: FakeIMAP, mailbox: Mailbox):
+        imap.thread_groups["INBOX"] = [[1, 2]]
+
+        async def _first():
+            return (await mailbox.threads())[0]
+
+        return _first
+
+    async def test_the_subject_comes_from_the_opening_message(self, thread) -> None:
+        """Replies carry "Re:", and some clients rewrite the subject
+        partway through."""
+        assert (await thread()).subject == "First"
+
+    async def test_the_root_identifies_the_conversation(self, thread) -> None:
+        assert (await thread()).root == 1
+
+    async def test_the_latest_message_is_last(self, thread) -> None:
+        assert (await thread()).latest.uid == 2
+
+    async def test_unseen_counts_only_the_unread(self, thread) -> None:
+        """Message 1 is read, message 2 is not."""
+        assert (await thread()).unseen == 1
+
+    async def test_the_date_is_the_newest_in_the_thread(self, thread) -> None:
+        found = await thread()
+        assert found.date == max(m.date for m in found.messages if m.date)
+
+    async def test_participants_are_unique_and_in_order(self, thread) -> None:
+        """Both messages are from the same sender; it is listed once."""
+        assert (await thread()).participants == ["Sender <sender@example.test>"]
+
+    async def test_size_is_the_whole_conversation(self, thread) -> None:
+        found = await thread()
+        assert found.size == sum(m.size for m in found.messages)
+
+    async def test_length_is_the_message_count(self, thread) -> None:
+        assert len(await thread()) == 2
 
 
 class TestFetching:

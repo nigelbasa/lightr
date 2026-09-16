@@ -38,6 +38,25 @@ What a client gets over IMAP:
 When a client sends through port 587, it saves its own copy to Sent
 over IMAP, as with any server. The server does not.
 
+### Configuring itself
+
+A mail app can find all of the above from the address alone, once the
+domain publishes the records for it:
+
+```bash
+lightr domain dns example.com --optional
+```
+
+That adds `autoconfig` and `autodiscover` CNAMEs and the two SRV
+records to the ones a domain already needs. Lightr then serves the XML
+each client asks for — Mozilla `config-v1.1.xml` for Thunderbird,
+Autodiscover for Outlook — over HTTPS, without a key, because a client
+has none until it knows where to connect.
+
+These records are optional. Mail is delivered without them, and
+`lightr domain verify` does not require them; without them, a client
+is set up by typing the table above in by hand.
+
 ## The mailbox API
 
 ### Signing in
@@ -92,12 +111,33 @@ mail store could not be reached.
 | `GET /v1/mailbox` | Address, display name, quota, and inbox counts. |
 | `GET /v1/mailbox/folders` | Every folder with message, unseen and UIDVALIDITY counts. |
 | `GET /v1/mailbox/messages?folder=&limit=&offset=` | Newest first. Filters: `unread`, `flagged`, `from`, `to`, `subject`, `text`, `since`, `before` (dates as `YYYY-MM-DD`). `limit` is capped at 200. |
+| `GET /v1/mailbox/threads?folder=&limit=&offset=` | The same messages grouped into conversations, most recently active first. Takes the same filters. `limit` counts threads, capped at 100. |
 | `GET /v1/mailbox/messages/{uid}?folder=` | Headers, text, HTML and attachment list. |
 | `GET /v1/mailbox/messages/{uid}/attachments/{index}?folder=` | The attachment's bytes. |
 
 Messages are identified by IMAP UID within a folder. A UID stays valid
 while the folder's `uidvalidity` is unchanged, so a client that caches
 should store both.
+
+A thread looks like this, and carries its messages so a conversation
+list needs one request:
+
+```json
+{
+  "uid": 41, "uids": [41, 44, 47], "count": 3,
+  "folder": "INBOX", "subject": "Invoice 42",
+  "participants": ["Billing <billing@example.com>", "You <you@example.com>"],
+  "date": "2026-09-14T11:02:00+00:00",
+  "unseen": 1, "flagged": false, "size": 18422,
+  "messages": [ ... ]
+}
+```
+
+Dovecot does the grouping, by `References` and `In-Reply-To`, so the
+threads match what a desktop mail app shows for the same mailbox.
+`uid` is the conversation's oldest message, and identifies it. Paging
+counts threads, never messages, so a conversation is never split
+across two pages.
 
 ### Changing messages
 
@@ -255,7 +295,6 @@ Worth knowing before designing around any of these:
 | | |
 | --- | --- |
 | ManageSieve (:4190) | Filters are managed through the API. A script uploaded some other way is overwritten the next time the rules change. |
-| Autoconfig / Autodiscover | Clients do not discover settings on their own. Enter them by hand, or serve the XML from your web server. |
 | JMAP, CalDAV, CardDAV | Mail only. |
-| Push to the API | `/v1/mailbox/events` (below). The `mail.received` webhook also exists, for organization-level integrations. |
-| Changing a password over the API | `lightr account passwd`, or the organization's identity provider for external accounts. |
+| SRV-only discovery | The SRV records are published, but a client that reads *only* SRV still asks the user for a username. Autoconfig and Autodiscover carry that. |
+| Server-side Sent copies | A client saves its own copy over IMAP, as with any server. |

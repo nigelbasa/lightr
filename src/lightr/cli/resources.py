@@ -420,11 +420,22 @@ def domain_dns(
     zone: Annotated[
         bool, typer.Option("--zone", help="Print as zone-file lines.")
     ] = False,
+    optional: Annotated[
+        bool,
+        typer.Option(
+            "--optional",
+            help="Also the autoconfig, autodiscover and SRV records.",
+        ),
+    ] = False,
 ) -> None:
     """Show the DNS records this domain should publish.
 
     Lightr never pushes records into a DNS provider -- it tells you
     what to publish and then verifies what you did.
+
+    `--optional` adds the records that let a mail app configure itself
+    from just an address. Mail is delivered without them, and `domain
+    verify` does not require them.
     """
     from lightr.mail.dns_records import records_for
 
@@ -436,6 +447,7 @@ def domain_dns(
             mail_hostname=found.hostname,
             dkim_selector=found.dkim_selector or "default",
             dkim_public_key=_dkim_public_key(found),
+            include_optional=optional,
         )
 
     found, records = run(_run)
@@ -463,6 +475,11 @@ def domain_dns(
     if not found.dkim_private_key:
         output.warn(
             f"No DKIM key yet. Run: lightr domain dkim {found.name} --generate"
+        )
+    if not optional:
+        output.info(
+            "Mail apps can configure themselves from an address with a few "
+            f"more records: lightr domain dns {found.name} --optional"
         )
     output.info(f"Then check with: lightr domain verify {found.name}")
 

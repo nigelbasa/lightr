@@ -24,6 +24,7 @@ from starlette.routing import Route, WebSocketRoute
 
 from lightr import __version__
 from lightr.api.auth import AuthError, Principal, authenticate, client_ip
+from lightr.api.autoconfig import AUTOCONFIG_PATHS, AUTOCONFIG_ROUTES
 from lightr.api.events import PATH as EVENTS_PATH
 from lightr.api.events import events
 from lightr.api.filters import FILTER_ROUTES
@@ -866,11 +867,16 @@ ROUTES.extend(SESSION_ROUTES)
 ROUTES.extend(MAILBOX_ROUTES)
 ROUTES.extend(FILTER_ROUTES)
 ROUTES.extend(INTERNAL_ROUTES)
+ROUTES.extend(AUTOCONFIG_ROUTES)
 
 #: Paths the API-key middleware does not guard. /health is public;
 #: the internal routes carry their own shared-secret check; signing in
-#: is how a client gets a key, and limits its own attempts.
-PUBLIC_PATHS = frozenset({"/health", SIGN_IN_PATH}) | INTERNAL_PATHS
+#: is how a client gets a key, and limits its own attempts. The
+#: autoconfig routes answer a client that has no credentials yet, and
+#: say nothing a DNS lookup would not.
+PUBLIC_PATHS = (
+    frozenset({"/health", SIGN_IN_PATH}) | INTERNAL_PATHS | AUTOCONFIG_PATHS
+)
 
 
 def create_app(cfg: Config, engine: AsyncEngine | None = None) -> Starlette:

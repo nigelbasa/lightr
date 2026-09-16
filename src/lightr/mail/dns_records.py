@@ -33,11 +33,28 @@ class RecordKind(StrEnum):
     DKIM = "DKIM"
     DMARC = "DMARC"
     PTR = "PTR"
+    #: Where Thunderbird and Outlook look for settings, and the SRV
+    #: records everything else reads. Mail is delivered without them;
+    #: they only save someone typing hostnames in by hand.
+    AUTOCONFIG = "AUTOCONFIG"
+    AUTODISCOVER = "AUTODISCOVER"
+    SRV_IMAP = "SRV_IMAP"
+    SRV_SUBMISSION = "SRV_SUBMISSION"
 
     @property
     def required_for_verification(self) -> bool:
-        """PTR is guidance, not a requirement -- see the module docstring."""
-        return self is not RecordKind.PTR
+        """Whether a domain is unverified without this record.
+
+        Only the four that decide whether mail is delivered and trusted.
+        PTR is set by whoever owns the IP -- see the module docstring --
+        and the client-discovery records are a convenience.
+        """
+        return self in _REQUIRED
+
+
+_REQUIRED = frozenset(
+    {RecordKind.MX, RecordKind.SPF, RecordKind.DKIM, RecordKind.DMARC}
+)
 
 
 class CheckState(StrEnum):
@@ -108,8 +125,16 @@ def records_for(
     dkim_selector: str = "default",
     dkim_public_key: str | None = None,
     dmarc: str = DEFAULT_DMARC,
+    include_optional: bool = False,
 ) -> list[Record]:
-    """The records this domain should publish."""
+    """The records this domain should publish.
+
+    ``include_optional`` adds the client-discovery records -- autoconfig,
+    autodiscover and the SRV pair. They are off by default because
+    ``verify()`` checks everything this returns, and a domain whose mail
+    works must not be reported as unverified for want of a CNAME that
+    only saves someone typing.
+    """
     host = mail_hostname or domain
     generated = [
         Record(RecordKind.MX, domain, "MX", f"{host}.", priority=10),
@@ -131,6 +156,28 @@ def records_for(
                 "TXT",
                 f"v=DKIM1; k=rsa; p={dkim_public_key}",
             ),
+        )
+
+    if include_optional:
+        generated.extend(
+            [
+                Record(RecordKind.AUTOCONFIG, f"autoconfig.{domain}", "CNAME", f"{host}."),
+                Record(
+                    RecordKind.AUTODISCOVER, f"autodiscover.{domain}", "CNAME", f"{host}."
+                ),
+                Record(
+                    RecordKind.SRV_IMAP,
+                    f"_imaps._tcp.{domain}",
+                    "SRV",
+                    f"0 1 993 {host}.",
+                ),
+                Record(
+                    RecordKind.SRV_SUBMISSION,
+                    f"_submission._tcp.{domain}",
+                    "SRV",
+                    f"0 1 587 {host}.",
+                ),
+            ]
         )
     return generated
 
@@ -207,6 +254,15 @@ def _matches(record: Record, found: list[str]) -> bool:
             return any(value.lower().startswith("v=dmarc1") for value in found)
         case RecordKind.PTR:
             return bool(found)
+        case RecordKind.AUTOCONFIG | RecordKind.AUTODISCOVER:
+            wanted = record.value.rstrip(".").lower()
+            return any(wanted == value.rstrip(".").lower() for value in found)
+        case RecordKind.SRV_IMAP | RecordKind.SRV_SUBMISSION:
+            # Weight and priority are the operator's to choose; the port
+            # and target are what a client actually connects to.
+            _, _, port_and_host = record.value.partition(" ")
+            wanted = port_and_host.partition(" ")[2].rstrip(".").lower()
+            return any(wanted in value.rstrip(".").lower() for value in found)
     return False
 
 

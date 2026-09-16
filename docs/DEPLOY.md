@@ -271,6 +271,33 @@ It will not report verified until MX, SPF, DKIM, and DMARC are all
 live. That is deliberate — a domain that passes here is one that other
 servers will accept mail from.
 
+### Letting mail apps configure themselves
+
+Optional, and worth doing: with four more records, Thunderbird and
+Outlook set themselves up from an address and a password, with no
+hostnames or ports typed in by hand.
+
+```bash
+lightr domain dns example.com --optional   # publish these too
+```
+
+That prints `autoconfig` and `autodiscover` CNAMEs pointing at the
+mail host, and SRV records for IMAP and submission. Lightr serves the
+XML each client fetches; nginx already proxies it, because it is the
+same API. Nothing else is needed on the server.
+
+Both CNAMEs must resolve and be covered by the certificate — a client
+fetching `https://autoconfig.example.com/...` will not accept a cert
+that does not name it:
+
+```bash
+certbot certonly --nginx -d mail.example.com \
+  -d autoconfig.example.com -d autodiscover.example.com
+```
+
+`lightr domain verify` ignores these records. A domain whose mail works
+is verified whether or not clients can discover it.
+
 ### Accounts and running
 
 ```bash

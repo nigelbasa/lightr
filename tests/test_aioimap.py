@@ -19,6 +19,7 @@ from lightr.dovecot.aioimap import (
     _parse_headers,
     _parse_internaldate,
     _parse_summaries,
+    _parse_threads,
     _quote,
 )
 from lightr.dovecot.mailbox import IMAPProtocol, MailboxError
@@ -127,6 +128,49 @@ class TestSummaryParsing:
         assert len(summaries) == 1
         assert summaries[0].uid == 7
         assert summaries[0].subject == ""
+
+
+class TestThreadParsing:
+    """Written against what the live Dovecot actually returned.
+
+    ``((2)(3))(1)(4 5)(6 7)(8)`` is one real response: nested groups,
+    flat pairs and singletons in the same line. Guessing at this format
+    is how a threaded inbox silently shows the wrong conversations.
+    """
+
+    LIVE = "((2)(3))(1)(4 5)(6 7)(8)(9)(10)(11 13)(12)"
+
+    def test_every_top_level_group_is_one_thread(self) -> None:
+        assert _parse_threads([self.LIVE]) == [
+            [2, 3], [1], [4, 5], [6, 7], [8], [9], [10], [11, 13], [12]
+        ]
+
+    def test_nesting_is_flattened(self) -> None:
+        """The tree says who replied to whom; a thread is its messages."""
+        assert _parse_threads(["((1)(2)(3))"]) == [[1, 2, 3]]
+
+    def test_deeper_nesting_still_yields_one_thread(self) -> None:
+        assert _parse_threads(["(1(2(3)(4))(5))"]) == [[1, 2, 3, 4, 5]]
+
+    def test_bytes_lines_are_handled(self) -> None:
+        assert _parse_threads([b"(4 5)(6)"]) == [[4, 5], [6]]
+
+    def test_the_completion_line_is_not_a_thread(self) -> None:
+        """Dovecot returns "Thread completed (0.10 + 0.00 secs)." --
+        digits in a line that is commentary, not a response."""
+        lines = [self.LIVE, "Thread completed (0.103 + 0.000 + 0.102 secs)."]
+        assert len(_parse_threads(lines)) == 9
+
+    def test_a_leading_keyword_is_stripped(self) -> None:
+        assert _parse_threads(["THREAD (1 2)(3)"]) == [[1, 2], [3]]
+
+    def test_an_empty_response_is_no_threads(self) -> None:
+        assert _parse_threads([]) == []
+        assert _parse_threads([""]) == []
+
+    def test_unbalanced_parens_do_not_raise(self) -> None:
+        """A truncated line should cost the thread, not the listing."""
+        assert _parse_threads(["(1 2))(3)"]) == [[1, 2], [3]]
 
 
 class TestHeaderParsing:

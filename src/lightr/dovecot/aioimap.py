@@ -250,6 +250,52 @@ class AioIMAPClient:
             uids.extend(int(token) for token in line.split() if token.isdigit())
         return uids
 
+    async def thread(self, folder: str, criteria: str = "ALL") -> list[list[int]]:
+        """Group a folder's messages into conversations, server-side.
+
+        Dovecot does this with THREAD (RFC 5256), which follows
+        References and In-Reply-To properly -- the thing a client cannot
+        do well from summaries, because it would need every message's
+        headers to find out which two of them are related.
+
+        aioimaplib's ``uid()`` refuses anything but COPY, FETCH, EXPUNGE
+        and STORE, so the command is built and executed directly. The
+        criteria replaces THREAD's search key, so it is the same string
+        SEARCH takes, and it goes across as one argument -- splitting it
+        would break a quoted value containing a space.
+
+        A server without THREAD leaves every message on its own, which
+        renders as the plain list a client would otherwise have shown.
+        Bad criteria still raise, because the fallback runs them through
+        SEARCH, which refuses them.
+        """
+        client = await self._ensure_selected(folder)
+        try:
+            from aioimaplib import Command
+        except ImportError as exc:  # pragma: no cover - depends on install
+            raise MailboxError(
+                "threading needs aioimaplib: pip install 'lightr[imap]'"
+            ) from exc
+
+        command = Command(
+            "THREAD",
+            client.protocol.new_tag(),
+            "REFERENCES",
+            "UTF-8",
+            criteria or "ALL",
+            prefix="UID",
+            loop=client.protocol.loop,
+        )
+        try:
+            response = await client.protocol.execute(command)
+        except Exception as exc:
+            log.debug("UID THREAD failed in %s: %s", folder, exc)
+            response = None
+
+        if response is None or response.result != "OK":
+            return [[uid] for uid in await self.search(folder, criteria)]
+        return _parse_threads(response.lines)
+
     async def fetch_summaries(
         self, folder: str, uids: list[int]
     ) -> list[MessageSummary]:
@@ -438,6 +484,47 @@ def _parse_summaries(lines: Any, folder: str) -> list[MessageSummary]:
 
     flush()
     return summaries
+
+
+def _parse_threads(lines: Any) -> list[list[int]]:
+    """Flatten a THREAD response into one list of UIDs per conversation.
+
+    The wire form nests: ``((2)(3))(1)(4 5)`` is three conversations,
+    the first of them a reply to a message and the third a pair. The
+    nesting describes who replied to whom, which no caller here needs --
+    a thread is its messages, and their order comes from their UIDs.
+    """
+    threads: list[list[int]] = []
+    for line in _as_lines(lines):
+        text = line.strip()
+        if text.upper().startswith("THREAD"):
+            text = text[len("THREAD"):].lstrip()
+        if not text.startswith("("):
+            # "Thread completed (0.10 secs)." and any other commentary.
+            continue
+
+        depth = 0
+        current: list[int] = []
+        digits = ""
+        for char in text:
+            if char.isdigit():
+                digits += char
+                continue
+            if digits:
+                current.append(int(digits))
+                digits = ""
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth = max(depth - 1, 0)
+                if depth == 0 and current:
+                    threads.append(current)
+                    current = []
+        if digits:
+            current.append(int(digits))
+        if current:
+            threads.append(current)
+    return threads
 
 
 def _parse_headers(blob: str) -> dict[str, str]:

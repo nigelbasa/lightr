@@ -611,3 +611,89 @@ class TestShutdown:
             pass
 
         assert drained == [True]
+
+
+class TestThreads:
+    """`/v1/mailbox/threads` -- the same mail, grouped."""
+
+    @pytest.fixture
+    def grouped(self) -> AsyncIterator[FakeIMAP]:
+        """A mailbox where 1 and 2 are one conversation."""
+        fake = FakeIMAP()
+        fake.thread_groups["INBOX"] = [[1, 2], [3]]
+        imap_client.set_client_factory(lambda cfg, email: fake)
+        yield fake
+        imap_client.set_client_factory(None)
+
+    async def test_it_needs_a_mailbox_key(
+        self, client: httpx.AsyncClient, world: dict
+    ) -> None:
+        response = await client.get("/v1/mailbox/threads")
+        assert response.status_code == 401
+
+    async def test_an_org_key_cannot_read_a_mailbox(
+        self, client: httpx.AsyncClient, world: dict
+    ) -> None:
+        response = await client.get(
+            "/v1/mailbox/threads", headers=auth(world["org_key"])
+        )
+        assert response.status_code == 403
+
+    async def test_conversations_come_back_grouped(
+        self, client: httpx.AsyncClient, world: dict, grouped: FakeIMAP
+    ) -> None:
+        response = await client.get(
+            "/v1/mailbox/threads", headers=auth(world["mailbox_key"])
+        )
+
+        assert response.status_code == 200
+        assert [t["uids"] for t in response.json()] == [[3], [1, 2]]
+
+    async def test_a_thread_carries_what_a_list_row_shows(
+        self, client: httpx.AsyncClient, world: dict, grouped: FakeIMAP
+    ) -> None:
+        body = (
+            await client.get(
+                "/v1/mailbox/threads", headers=auth(world["mailbox_key"])
+            )
+        ).json()
+        conversation = next(t for t in body if t["count"] == 2)
+
+        assert conversation["uid"] == 1
+        assert conversation["subject"] == "First"
+        assert conversation["unseen"] == 1
+        assert conversation["folder"] == "INBOX"
+        assert len(conversation["messages"]) == 2
+
+    async def test_the_limit_counts_threads(
+        self, client: httpx.AsyncClient, world: dict, grouped: FakeIMAP
+    ) -> None:
+        body = (
+            await client.get(
+                "/v1/mailbox/threads?limit=1", headers=auth(world["mailbox_key"])
+            )
+        ).json()
+
+        assert [t["uids"] for t in body] == [[3]]
+
+    async def test_filters_apply(
+        self, client: httpx.AsyncClient, world: dict, grouped: FakeIMAP
+    ) -> None:
+        """Message 1 is read, so its conversation keeps only message 2."""
+        body = (
+            await client.get(
+                "/v1/mailbox/threads?unread=1", headers=auth(world["mailbox_key"])
+            )
+        ).json()
+
+        assert [t["uids"] for t in body] == [[3], [2]]
+
+    async def test_an_empty_folder_is_an_empty_list(
+        self, client: httpx.AsyncClient, world: dict
+    ) -> None:
+        response = await client.get(
+            "/v1/mailbox/threads?folder=Trash", headers=auth(world["mailbox_key"])
+        )
+
+        assert response.status_code == 200
+        assert response.json() == []

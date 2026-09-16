@@ -105,6 +105,68 @@ class MessageDetail(MessageSummary):
         return bool(self.attachments)
 
 
+@dataclass(slots=True)
+class Thread:
+    """One conversation, its messages oldest first.
+
+    Deliberately flat. Dovecot's THREAD response is a tree describing
+    who replied to whom, but no client Lightr serves renders that tree
+    -- they show a conversation and the messages in it, in order.
+    """
+
+    uids: list[int]
+    messages: list[MessageSummary]
+
+    def __len__(self) -> int:
+        return len(self.messages)
+
+    @property
+    def root(self) -> int:
+        """The UID a client uses to identify the conversation."""
+        return self.uids[0]
+
+    @property
+    def latest(self) -> MessageSummary:
+        return self.messages[-1]
+
+    @property
+    def subject(self) -> str:
+        """The conversation's subject: the first message that has one.
+
+        Replies carry "Re:" and some clients rewrite the subject
+        mid-thread, so the opening message is the one that named it.
+        """
+        return next((m.subject for m in self.messages if m.subject), "")
+
+    @property
+    def participants(self) -> list[str]:
+        """Everyone who wrote, in the order they first did."""
+        return list(dict.fromkeys(m.from_ for m in self.messages if m.from_))
+
+    @property
+    def date(self) -> datetime | None:
+        dates = [m.date for m in self.messages if m.date is not None]
+        return max(dates) if dates else None
+
+    @property
+    def unseen(self) -> int:
+        return sum(1 for m in self.messages if not m.seen)
+
+    @property
+    def flagged(self) -> bool:
+        return any(m.flagged for m in self.messages)
+
+    @property
+    def size(self) -> int:
+        return sum(m.size for m in self.messages)
+
+
+#: `list` inside the Mailbox class body resolves to `Mailbox.list`, the
+#: method, so a `list[...]` return annotation written there is not a
+#: type at all. Naming the shape out here keeps it one.
+ThreadList = list[Thread]
+
+
 @runtime_checkable
 class IMAPProtocol(Protocol):
     """The narrow slice of IMAP the mailbox adapter needs."""
@@ -114,6 +176,7 @@ class IMAPProtocol(Protocol):
     async def list_folders(self) -> list[Folder]: ...
     async def select(self, folder: str) -> Folder: ...
     async def search(self, folder: str, criteria: str) -> list[int]: ...
+    async def thread(self, folder: str, criteria: str = "ALL") -> list[list[int]]: ...
     async def fetch_summaries(self, folder: str, uids: list[int]) -> list[MessageSummary]: ...
     async def fetch_raw(self, folder: str, uid: int) -> bytes: ...
     async def append(
@@ -314,6 +377,51 @@ class Mailbox:
         order = {uid: position for position, uid in enumerate(window)}
         return sorted(summaries, key=lambda m: order.get(m.uid, 0))
 
+    async def threads(
+        self,
+        folder: str = "INBOX",
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        criteria: str = "ALL",
+    ) -> ThreadList:
+        """Conversations in a folder, most recently active first.
+
+        The window is applied to threads, not to messages: paging by UID
+        would cut a conversation in half across two pages. THREAD
+        returns the whole structure in one cheap round trip, so only the
+        messages actually on this page are fetched.
+
+        Ordered by highest UID, which is the same "UIDs are monotonic
+        under Dovecot" assumption `list` makes, so the two orderings
+        agree about what "newest" means.
+        """
+        groups = await self._client.thread(folder, criteria)
+        ordered = sorted(
+            (sorted(group) for group in groups if group),
+            key=lambda uids: uids[-1],
+            reverse=True,
+        )
+        window = ordered[offset : offset + limit]
+        if not window:
+            return []
+
+        summaries = await self._client.fetch_summaries(
+            folder, [uid for group in window for uid in group]
+        )
+        by_uid = {summary.uid: summary for summary in summaries}
+
+        threads: list[Thread] = []
+        for group in window:
+            # A message that vanished between THREAD and FETCH is
+            # dropped rather than left as a gap in the conversation.
+            messages = [by_uid[uid] for uid in group if uid in by_uid]
+            if messages:
+                threads.append(
+                    Thread(uids=[m.uid for m in messages], messages=messages)
+                )
+        return threads
+
     async def get(self, folder: str, uid: int) -> MessageDetail:
         raw = await self._client.fetch_raw(folder, uid)
         if not raw:
@@ -466,6 +574,7 @@ __all__ = [
     "MessageDetail",
     "MessageNotFoundError",
     "MessageSummary",
+    "Thread",
     "build_search_criteria",
     "decode_mime_header",
     "extract_attachment",

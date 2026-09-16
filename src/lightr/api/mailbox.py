@@ -161,6 +161,53 @@ async def list_messages(request: Request) -> Response:
     return _json([_summary(m) for m in messages])
 
 
+def _thread(thread: Any) -> dict[str, Any]:
+    return {
+        "uid": thread.root,
+        "uids": thread.uids,
+        "count": len(thread),
+        "folder": thread.latest.folder,
+        "subject": thread.subject,
+        "participants": thread.participants,
+        "date": thread.date,
+        "unseen": thread.unseen,
+        "flagged": thread.flagged,
+        "size": thread.size,
+        "messages": [_summary(m) for m in thread.messages],
+    }
+
+
+async def list_threads(request: Request) -> Response:
+    """The same messages as `/messages`, grouped into conversations.
+
+    Dovecot does the grouping, by References and In-Reply-To, so a
+    client gets the same threads a desktop mail app would show. The
+    filters are the ones `/messages` takes, and `limit` counts threads:
+    a page never cuts a conversation in half.
+    """
+    params = request.query_params
+    folder = params.get("folder", "INBOX")
+    criteria = build_search_criteria(
+        unread=params.get("unread") in ("1", "true", "yes"),
+        flagged=params.get("flagged") in ("1", "true", "yes"),
+        sender=params.get("from"),
+        recipient=params.get("to"),
+        subject=params.get("subject"),
+        text=params.get("text"),
+        since=params.get("since"),
+        before=params.get("before"),
+    )
+
+    async with _open(request) as (mailbox, _):
+        threads = await mailbox.threads(
+            folder,
+            limit=_int(params.get("limit"), 50, maximum=100),
+            offset=_int(params.get("offset"), 0),
+            criteria=criteria,
+        )
+    return _json([_thread(t) for t in threads])
+
+
 async def get_message(request: Request) -> Response:
     folder = request.query_params.get("folder", "INBOX")
     uid = _uid(request)
@@ -777,6 +824,7 @@ MAILBOX_ROUTES: list[Route] = [
     Route("/v1/mailbox/forwarding", set_forwarding, methods=["PUT"]),
     Route("/v1/mailbox/forwarding", stop_forwarding, methods=["DELETE"]),
     Route("/v1/mailbox/messages", list_messages, methods=["GET"]),
+    Route("/v1/mailbox/threads", list_threads, methods=["GET"]),
     Route("/v1/mailbox/messages/bulk", bulk_messages, methods=["POST"]),
     Route("/v1/mailbox/messages/{id}", get_message, methods=["GET"]),
     Route("/v1/mailbox/messages/{id}", mark_message, methods=["PATCH"]),

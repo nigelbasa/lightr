@@ -190,3 +190,140 @@ class TestVerificationOutcome:
             RecordKind.SPF,
             RecordKind.DKIM,
         }
+
+
+class TestClientDiscoveryRecords:
+    """Autoconfig, autodiscover and the SRV pair.
+
+    They let a mail app configure itself from an address alone. Mail is
+    delivered without them, which is exactly why they must not be able
+    to hold a domain back from verifying -- a domain whose mail works
+    is verified.
+    """
+
+    def test_they_are_absent_by_default(self) -> None:
+        kinds = {r.kind for r in records_for("acme.test", mail_hostname="mail.acme.test")}
+
+        assert RecordKind.AUTOCONFIG not in kinds
+        assert RecordKind.SRV_IMAP not in kinds
+
+    def test_include_optional_adds_all_four(self) -> None:
+        kinds = {
+            r.kind
+            for r in records_for(
+                "acme.test", mail_hostname="mail.acme.test", include_optional=True
+            )
+        }
+
+        assert {
+            RecordKind.AUTOCONFIG,
+            RecordKind.AUTODISCOVER,
+            RecordKind.SRV_IMAP,
+            RecordKind.SRV_SUBMISSION,
+        } <= kinds
+
+    def test_the_required_records_are_unchanged_by_the_flag(self) -> None:
+        plain = records_for("acme.test", mail_hostname="mail.acme.test")
+        extended = records_for(
+            "acme.test", mail_hostname="mail.acme.test", include_optional=True
+        )
+
+        assert extended[: len(plain)] == plain
+
+    def _record(self, kind: RecordKind):
+        return next(
+            r
+            for r in records_for(
+                "acme.test", mail_hostname="mail.acme.test", include_optional=True
+            )
+            if r.kind is kind
+        )
+
+    def test_autoconfig_is_a_cname_at_the_name_thunderbird_fetches(self) -> None:
+        record = self._record(RecordKind.AUTOCONFIG)
+
+        assert record.name == "autoconfig.acme.test"
+        assert record.type == "CNAME"
+        assert record.value == "mail.acme.test."
+
+    def test_autodiscover_is_the_name_outlook_fetches(self) -> None:
+        assert self._record(RecordKind.AUTODISCOVER).name == "autodiscover.acme.test"
+
+    def test_the_imap_srv_names_the_tls_port(self) -> None:
+        record = self._record(RecordKind.SRV_IMAP)
+
+        assert record.name == "_imaps._tcp.acme.test"
+        assert record.type == "SRV"
+        assert record.value.endswith("993 mail.acme.test.")
+
+    def test_the_submission_srv_names_port_587(self) -> None:
+        record = self._record(RecordKind.SRV_SUBMISSION)
+
+        assert record.name == "_submission._tcp.acme.test"
+        assert "587" in record.value
+
+
+class TestOnlyDeliverabilityDecidesVerification:
+    def test_the_four_mail_records_are_required(self) -> None:
+        assert all(
+            k.required_for_verification
+            for k in (
+                RecordKind.MX,
+                RecordKind.SPF,
+                RecordKind.DKIM,
+                RecordKind.DMARC,
+            )
+        )
+
+    def test_ptr_and_the_discovery_records_are_not(self) -> None:
+        assert not any(
+            k.required_for_verification
+            for k in (
+                RecordKind.PTR,
+                RecordKind.AUTOCONFIG,
+                RecordKind.AUTODISCOVER,
+                RecordKind.SRV_IMAP,
+                RecordKind.SRV_SUBMISSION,
+            )
+        )
+
+    def test_an_unpublished_autoconfig_does_not_block_a_domain(self) -> None:
+        """The regression this pair of mechanisms exists to prevent."""
+        checks = [
+            CheckResult(kind, CheckState.OK)
+            for kind in (
+                RecordKind.MX,
+                RecordKind.SPF,
+                RecordKind.DKIM,
+                RecordKind.DMARC,
+            )
+        ]
+        checks.append(CheckResult(RecordKind.AUTOCONFIG, CheckState.MISSING))
+
+        assert Verification("acme.test", checks).verified
+
+
+class TestDiscoveryRecordMatching:
+    def test_a_cname_matches_its_target(self) -> None:
+        record = Record(RecordKind.AUTOCONFIG, "autoconfig.acme.test", "CNAME",
+                        "mail.acme.test.")
+
+        assert _matches(record, ["mail.acme.test"])
+
+    def test_a_cname_pointing_elsewhere_does_not(self) -> None:
+        record = Record(RecordKind.AUTOCONFIG, "autoconfig.acme.test", "CNAME",
+                        "mail.acme.test.")
+
+        assert not _matches(record, ["mail.globex.test"])
+
+    def test_an_srv_matches_on_port_and_target(self) -> None:
+        record = Record(RecordKind.SRV_IMAP, "_imaps._tcp.acme.test", "SRV",
+                        "0 1 993 mail.acme.test.")
+
+        assert _matches(record, ["10 5 993 mail.acme.test."]), "weight is the operator's"
+
+    def test_an_srv_on_the_wrong_port_does_not(self) -> None:
+        record = Record(RecordKind.SRV_IMAP, "_imaps._tcp.acme.test", "SRV",
+                        "0 1 993 mail.acme.test.")
+
+        assert not _matches(record, ["0 1 143 mail.acme.test."])
